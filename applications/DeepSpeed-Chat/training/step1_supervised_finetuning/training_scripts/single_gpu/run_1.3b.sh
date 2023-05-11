@@ -8,13 +8,14 @@
 OUTPUT=$1
 ZERO_STAGE=$2
 if [ "$OUTPUT" == "" ]; then
-    OUTPUT=./output
+    OUTPUT=../output/opt_1b
 fi
 if [ "$ZERO_STAGE" == "" ]; then
     ZERO_STAGE=0
 fi
 mkdir -p $OUTPUT
-
-deepspeed --num_gpus 1 main.py --model_name_or_path facebook/opt-1.3b \
+# mkdir -p 当前脚本路径的父路径
+# bash工作路径： shell脚本的存储路径
+nohup deepspeed --num_gpus 1 ../main.py --model_name_or_path facebook/opt-1.3b \
    --gradient_accumulation_steps 8 --lora_dim 128 --zero_stage $ZERO_STAGE \
-   --deepspeed --output_dir $OUTPUT &> $OUTPUT/training.log
+   --deepspeed --output_dir $OUTPUT &> $OUTPUT/training_opt_1.3b.log 2>&1 &

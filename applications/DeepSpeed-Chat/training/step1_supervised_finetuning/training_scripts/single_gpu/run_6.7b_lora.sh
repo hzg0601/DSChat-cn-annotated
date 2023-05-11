@@ -5,10 +5,10 @@
 # DeepSpeed Team
 
 # Note that usually LoRA needs to use larger learning rate
-OUTPUT_PATH=./output
+OUTPUT_PATH=../output/opt_6b/
 mkdir -p $OUTPUT_PATH
 
-deepspeed --num_gpus 1 main.py \
+nohup deepspeed --num_gpus 1 ../main.py \
    --data_path Dahoas/rm-static Dahoas/full-hh-rlhf Dahoas/synthetic-instruct-gptj-pairwise yitingxie/rlhf-reward-datasets \
    --data_split 2,4,4 \
    --model_name_or_path facebook/opt-6.7b \
@@ -28,4 +28,4 @@ deepspeed --num_gpus 1 main.py \
    --lora_module_name decoder.layers. \
    --deepspeed \
    --output_dir $OUTPUT_PATH \
-   &> $OUTPUT_PATH/training.log
+   &> $OUTPUT_PATH/training_opt_6.7b_lora.log 2>&1 &

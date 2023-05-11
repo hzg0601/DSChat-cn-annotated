@@ -16,7 +16,7 @@ mkdir -p $OUTPUT
 # The Chinese data we found mostly only contain one response without another
 # "rejected" response. Thus we only test the step 1 finetuning and use
 # a data_split of 10,0,0 (keep all data for step 1).
-deepspeed main.py \
+nohup deepspeed ../main.py \
    --data_path wangrui6/Zhihu-KOL Cohere/miracl-zh-queries-22-12 Hello-SimpleAI/HC3-Chinese mkqa-Chinese \
    --data_split 10,0,0 \
    --model_name_or_path bigscience/bloom-1b1 \
@@ -33,4 +33,4 @@ deepspeed main.py \
    --zero_stage $ZERO_STAGE \
    --deepspeed \
    --output_dir $OUTPUT \
-   &> $OUTPUT/training.log
+   &> $OUTPUT/training.log 2>&1 &
