@@ -1,7 +1,21 @@
 #!/usr/bin/env python
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
+"""
+脚本的流程基本如step1的训练流程，只是更换了模型的输出和评估标准，注释详见step1的main.py
+其核心为RewardModel类：
+RewardModel应为transformers的BaseModel,其返回值的一个为hidden_states
+输入必须自带正负样本，前一半为正样本，后一半为负样本
+将最后一层映射为一个标量，然后将输出按正负样本分开；
+如果正样本与负样本对应位置间没有重复，则以num_padding位置或seq_len位置的得分为
+chosen和reject得分，以二者的差的sigmoid.mean()为损失
+则以(第一个重合的位置) 到 (num_padding的位置或seq_len的较大者)的值为chosen和reject的得分，
+以二者差的sigmoid.mean()为损失；
+训练时返回loss, chosen_score,reject_score;
+预测时返回标量值或(标量值+chosen_scores)
 
+
+"""
 # DeepSpeed Team
 import argparse
 import os
@@ -243,7 +257,6 @@ def main():
                                  sampler=eval_sampler,
                                  batch_size=args.per_device_eval_batch_size)
     #! 定义reward模型的评估函数
-    # 
     def evaluation_reward(model, eval_dataloader):
         model.eval()
         correct_predictions = 0
@@ -256,7 +269,7 @@ def main():
 
             chosen = outputs["chosen_mean_scores"]
             rejected = outputs["rejected_mean_scores"]
-            # chosen得分大于reject的得分则预测正确
+            #* chosen得分大于reject的得分则预测正确
             correct_predictions += (chosen > rejected).sum()
             total_predictions += chosen.shape[0]
             # chosen的得分为最终得分
