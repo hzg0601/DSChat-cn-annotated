@@ -203,7 +203,9 @@ def main():
 
     tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=True)
     tokenizer.pad_token = tokenizer.eos_token
-
+    #! 构造 rm模型
+    # 其调用的是create_critic_model函数，该函数的主要类是RewardModel类
+    # 
     rm_model = create_critic_model(args.model_name_or_path,
                                    tokenizer,
                                    ds_config,
@@ -240,7 +242,8 @@ def main():
                                  collate_fn=data_collator,
                                  sampler=eval_sampler,
                                  batch_size=args.per_device_eval_batch_size)
-
+    #! 定义reward模型的评估函数
+    # 
     def evaluation_reward(model, eval_dataloader):
         model.eval()
         correct_predictions = 0
@@ -253,11 +256,14 @@ def main():
 
             chosen = outputs["chosen_mean_scores"]
             rejected = outputs["rejected_mean_scores"]
+            # chosen得分大于reject的得分则预测正确
             correct_predictions += (chosen > rejected).sum()
             total_predictions += chosen.shape[0]
+            # chosen的得分为最终得分
             scores += outputs["chosen_mean_scores"].mean().float()
             if step == 99:  # For faster evaluation and debugging
                 break
+        # 计算预测的acc和平均得分
         acc = correct_predictions / total_predictions
         scores = scores / (step + 1)
         try:
@@ -307,7 +313,7 @@ def main():
     print_rank_0(
         f"chosen_last_scores (higher is better) : {reward_score}, acc (higher is better) : {acc}",
         args.global_rank)
-
+    # 执行标准训练流程
     for epoch in range(args.num_train_epochs):
         print_rank_0(
             f"Beginning of Epoch {epoch+1}/{args.num_train_epochs}, Total Micro Batches {len(train_dataloader)}",
@@ -325,6 +331,7 @@ def main():
             f"Epoch {epoch+1}/{args.num_train_epochs} with loss {mean_loss/(step+1)}",
             args.global_rank)
         # Evaluate reward_loss on the validation set.
+        # 每次训练后，评估模型，打印得分和预测准确率
         print_rank_0(
             f"***** Evaluating reward, Epoch {epoch+1}/{args.num_train_epochs} *****",
             args.global_rank)
