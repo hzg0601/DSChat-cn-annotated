@@ -346,15 +346,21 @@ class DataCollatorReward:
 
 
 class DataCollatorRLHF:
-
+    """将给定的pad_token填充至最长句子的长度或max_token_len"""
     def __init__(self, max_token_len, inference_tp_size):
         self.max_token_len = max_token_len
         self.inference_tp_size = inference_tp_size
 
     def __call__(self, data):
         batch = {}
+        #? 最后一个句子的最后一个元素必为pad_token
+        #? 若如此，数据必然是一个list或tuple，第一个为句子，第二个为待的mask序列，最后一个为pad_token
         pad_token_id = data[-1][-1]
-
+        #  Tensor of size T x B x * if batch_first is False. Tensor of size B x T x * otherwise
+        # B is batch size. It is equal to the number of elements in sequences. 
+        # T is length of the longest sequence. 
+        # L is length of the sequence. 
+        # * is any number of trailing dimensions, including none.
         prompt = pad_sequence([f[0] for f in data],
                               padding_value=pad_token_id,
                               batch_first=True)
@@ -363,7 +369,10 @@ class DataCollatorRLHF:
                                    batch_first=True)
 
         ### make sure the final ouput is a seqence of 2**?
+        #? T即最长句子的长度
         length = prompt.size()[-1]
+        #? 如果需要pad的长度大于句子的长度，则继续pad至max_token_len
+        
         pad_length = self.max_token_len - length
         if pad_length > 0:
             batch["prompt"] = F.pad(prompt,
@@ -377,6 +386,8 @@ class DataCollatorRLHF:
         else:
             batch["prompt"] = prompt
             batch["prompt_att_mask"] = prompt_mask
+        # torch.flip是反序地复制一份新的数据，这一点与NumPy不同，NumPy是返回一个view，因而使用torch.flip耗时更久。
+        #? 按第1维翻转,但为什么要翻转->
         batch["prompt"] = batch["prompt"].flip(1)
         batch["prompt_att_mask"] = batch["prompt_att_mask"].flip(1)
         return batch

@@ -66,7 +66,7 @@ class DeepSpeedPPOTrainer():
         self.lam = 0.95
 
     def _generate_sequence(self, prompts, mask):
-
+        """以无梯度的方式生成给定prompts的answer,然后删除回复长度小于1的条目"""
         max_min_length = self.max_answer_seq_len + prompts.shape[1]
 
         with torch.no_grad():
@@ -75,7 +75,8 @@ class DeepSpeedPPOTrainer():
                                                    max_length=max_min_length,
                                                    min_length=max_min_length)
 
-        # Filter out seq with no answers (or very short). This happens when users directly use the pre-training ckpt without supervised finetuning
+        # Filter out seq with no answers (or very short). 
+        # This happens when users directly use the pre-training ckpt without supervised finetuning
         # NOTE: this will causes each GPU has different number of examples
         batch_size = seq.shape[0]
         prompt_length = prompts.shape[1]
@@ -94,20 +95,26 @@ class DeepSpeedPPOTrainer():
         return out_seq
 
     def generate_experience(self, prompts, mask):
+        #* 1.首先令actor模型针对给定的prompts,生成answer，无需梯度追踪
         self.eval()
         seq = self._generate_sequence(prompts, mask)
+        #* 2.  
         self.train()
 
         pad_token_id = self.tokenizer.pad_token_id
+        # 与给定的对象比较，返回一个与seq形状一致的bool类型，即确定attention的字符
         attention_mask = seq.not_equal(pad_token_id).long()
 
         with torch.no_grad():
             output = self.actor_model(seq, attention_mask=attention_mask)
             output_ref = self.ref_model(seq, attention_mask=attention_mask)
+            # 计算actor返回序列的奖励值，choosen_end_scores长度为batch_size//2
             reward_score = self.reward_model.forward_value(
                 seq, attention_mask,
                 prompt_length=self.prompt_length)['chosen_end_scores'].detach(
                 )
+            # RewardModel类的只返回得分不返回损失的函数,是最后一层映射的结果 batch_size * seq 
+            # 返回的是batch_size * seq的tensor,只取最后一个作为最终得分，不考虑pad_token的位置等因素
             values = self.critic_model.forward_value(
                 seq, attention_mask, return_value_only=True).detach()[:, :-1]
 
@@ -116,12 +123,12 @@ class DeepSpeedPPOTrainer():
 
         return {
             'prompts': prompts,
-            'logprobs': gather_log_probs(logits[:, :-1, :], seq[:, 1:]),
+            'logprobs': gather_log_probs(logits[:, :-1, :], seq[:, 1:]), # 由此看出，ref模型和actor模型的行为几乎一致
             'ref_logprobs': gather_log_probs(logits_ref[:, :-1, :], seq[:,
                                                                         1:]),
-            'value': values,
-            'rewards': reward_score,
-            'input_ids': seq,
+            'value': values, # RewardModel中v_head返回的最后个token的得分，不考虑pad_token的位置
+            'rewards': reward_score, # 即RewardModel返回的chosen_end_scores 
+            'input_ids': seq, # actor_model针对prompts的输出
             "attention_mask": attention_mask
         }
 

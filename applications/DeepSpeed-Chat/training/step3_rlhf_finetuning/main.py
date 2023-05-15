@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
+"""
 
+"""
 # DeepSpeed Team
 """
 
@@ -68,11 +70,13 @@ def parse_args():
         help=
         'Where to store the data-related files such as shuffle index. This needs to be on a local storage of a node (not on a shared storage)'
     )
+    #* RL模型中的PPO-ptx模型需要使用unsupervised数据的分布作为惩罚以保持无监督的表现
     parser.add_argument(
         "--unsupervised_dataset_name",
         type=str,
         default=None,
         help="The name of the dataset to use (via the datasets library).")
+
     parser.add_argument(
         "--unsupervised_dataset_config_name",
         type=str,
@@ -80,10 +84,13 @@ def parse_args():
         help=
         "The configuration name of the dataset to use (via the datasets library)."
     )
+    #? KL奖励系数$\beta$和预训练损失系数$\gamma$控制KL惩罚和预训练部分的强度，对于PPO模型,预训练损失系数为零。
+    # $\gamma$控制预训练损失，以保持在公告数据集上（其他非生成任务上）的性能回归。
     parser.add_argument("--unsup_coef",
                         type=float,
                         default=27.8,
                         help='''gamma in Equation 2 from InstructGPT paper''')
+
     parser.add_argument(
         "--actor_model_name_or_path",
         type=str,
@@ -146,6 +153,7 @@ def parse_args():
         default=5e-6,
         help="Initial learning rate (after the potential warmup period) to use."
     )
+    # L2惩罚
     parser.add_argument("--actor_weight_decay",
                         type=float,
                         default=0.,
@@ -197,25 +205,30 @@ def parse_args():
                         default=-1,
                         help="local_rank for distributed training on gpus")
 
-    # DeepSpeed
+    # DeepSpeed 
+    #? hybrid engine -> 模型同时用于训练和推理，非hybrid模型仅训练
+    # 为actor模型启用混合引擎，以通过 DeepSpeed 优化推理和训练 
     parser.add_argument(
         "--enable_hybrid_engine",
         action='store_true',
         help=
         "Enable hybrid engine for actor model to optimize both inference and training through DeepSpeed."
     )
+    # 在生成期间取消固定 actor 的参数
     parser.add_argument(
         "--unpin_actor_parameters",
         action='store_true',
         help=
         "Unpin actor's parameters during generation. This makes generation slower but requires less memory."
     )
+    # 在推断阶段释放缓存
     parser.add_argument(
         "--release_inference_cache",
         action='store_true',
         help=
         "Release the memory cache used for inference. This makes generation preparation slower but might increase e2e throughput by using larger batch size."
     )
+    # 推断优化中张量并行的程度，在hybrid engine中必须开启
     parser.add_argument(
         "--inference_tp_size",
         type=int,
@@ -223,6 +236,7 @@ def parse_args():
         help=
         "Tensor-parallelism degree used for the inference-optimization. Please note hybrid-engine need to be enabled when using this feature."
     )
+    #? 在混合engine中，张量并行分片里引入到层中的粒度
     parser.add_argument(
         "--tp_gather_partition_size",
         type=int,
@@ -230,13 +244,16 @@ def parse_args():
         help=
         "Granularity to bring in layers for TP sharding inside the hybrid engine. Please note hybrid-engine and tp_inference_size > 1 need to be true when using this feature."
     )
+    # ZeRO的offload技巧
     parser.add_argument('--offload',
                         action='store_true',
                         help='Enable ZeRO Offload techniques.')
+    #? reference model是啥,按后文，与actor模型一致，应为offload技术的特征-> 
     parser.add_argument(
         '--offload_reference_model',
         action='store_true',
         help='Enable ZeRO Offload techniques for reference model')
+    # Actor模型的ZeRO优化步骤
     parser.add_argument(
         '--actor_zero_stage',
         type=int,
@@ -247,6 +264,7 @@ def parse_args():
         type=int,
         default=0,
         help='ZeRO optimization stage for Critic model (and reward).')
+    # 开启HF的梯度检查点优化
     parser.add_argument(
         '--actor_gradient_checkpointing',
         action='store_true',
@@ -255,6 +273,7 @@ def parse_args():
         '--critic_gradient_checkpointing',
         action='store_true',
         help='Enable HF gradient checkpointing for Critic model.')
+    # 取消actor模型中的dropout
     parser.add_argument('--disable_actor_dropout',
                         action='store_true',
                         help='Disable the dropout of the actor model.')
@@ -266,6 +285,7 @@ def parse_args():
                         type=int,
                         default=0,
                         help="If > 0, use LoRA for efficient training.")
+    #* 执行LoRA优化的actor模型的模块
     parser.add_argument("--actor_lora_module_name",
                         type=str,
                         default="decoder.layers.",
@@ -278,10 +298,22 @@ def parse_args():
                         type=str,
                         default="decoder.layers.",
                         help="The scope of LoRA.")
+
     parser.add_argument('--only_optimize_lora',
                         action='store_true',
                         help='Only optimize the LoRA parameters.')
     ## Make EMA as an optional feature
+    #? EMA检查点？-> 维护一个影子权重，在每次更新模型权重的时候，对影子权重进行EMA。
+    #? #评估模型和导出模型的时候都使用影子权重。在checkpoint中，model的权重即是 EMA 后的权重。
+    # 如果我们对数据进行二次采样(例如，随机采样再进行一次随机采样)，就有可能产生信息损失，
+    # 因为每次采样都只能表征部分数据的分布情况，而采样本身存在一定的不确定性，
+    # 可能导致选取的数据样本并不能完全代表原始数据集的统计特征。
+
+    #使用EMA可以避免数据二次采样带来的信息损失风险，这是因为EMA是基于历史权重指数平均得到的，
+    # 而不是直接对数据样本求平均值。在这个过程中，算法会记录参数历史的加权平均值，
+    # 因此每个数据点的贡献是逐渐变小的。这样，在使用EMA进行优化时，
+    # 可以更好地反映出历史信息的影响，使得评估指标更准确、更稳定。
+    # 
     parser.add_argument('--enable_ema',
                         action='store_true',
                         help='Enable EMA checkpoint for the model.')
@@ -306,17 +338,20 @@ def parse_args():
 
 
 def create_datasets(args, tokenizer, train_phase=3):
+    
     unsupervised_training_enabled = args.unsupervised_dataset_name and args.unsupervised_dataset_config_name
     prompt_train_dataset, _ = create_prompt_dataset(
         args.local_rank, args.data_path, args.data_split,
         args.data_output_path, train_phase, args.seed, tokenizer,
         args.max_prompt_seq_len)
+    # 先判断是否使用无监督训练数据，亦即使用PPO-ptx模式
     if unsupervised_training_enabled:
         unsupervised_train_dataset = get_unsupervised_data(args, tokenizer)
     else:
         unsupervised_train_dataset = None
 
     # DataLoaders creation:
+    # 将给定的pad_token填充至最长句子的长度或max_token_len
     data_collator = DataCollatorRLHF(args.max_prompt_seq_len,
                                      args.inference_tp_size)
     if args.local_rank == -1:
@@ -329,11 +364,15 @@ def create_datasets(args, tokenizer, train_phase=3):
         if unsupervised_training_enabled:
             unsupervised_train_sampler = DistributedSampler(
                 unsupervised_train_dataset)
+    # PPO训练数据按照DataCollatorRLHF组装数据
     prompt_train_dataloader = DataLoader(
         prompt_train_dataset,
         collate_fn=data_collator,
         sampler=prompt_train_sampler,
         batch_size=args.per_device_train_batch_size)
+    #* 无监督数据仍按默认collator组装数据（主要是padding)
+    # 默认为torch_default_data_collator,即将所有数据统一为tensor,然后将标签的key变为'label'
+    # 如果不包含无监督数据，则无监督数据为[None]*监督数据长度
     if unsupervised_training_enabled:
         unsupervised_train_dataloader = DataLoader(
             unsupervised_train_dataset,
@@ -343,10 +382,11 @@ def create_datasets(args, tokenizer, train_phase=3):
     else:
         unsupervised_train_dataloader = [None] * len(
             prompt_train_dataloader)  # basically a dummy dataloader
-
+    # 确定每个epoch权重更新的次数
     num_update_steps_per_epoch = min(len(prompt_train_dataloader), len(unsupervised_train_dataloader)) * \
         (args.per_device_train_batch_size / args.per_device_mini_train_batch_size) * \
         args.ppo_epochs / args.gradient_accumulation_steps
+    # 总更新次数
     num_total_iters = int(args.num_train_epochs * num_update_steps_per_epoch)
 
     return prompt_train_dataloader, unsupervised_train_dataloader, num_total_iters
@@ -376,6 +416,7 @@ def main():
 
     # If passed along, set the training seed now.
     set_random_seed(args.seed)
+    # 同步各节点的通信
     torch.distributed.barrier()
 
     # create common tokenizer based on actor model
@@ -387,6 +428,7 @@ def main():
         args=args, tokenizer=tokenizer, train_phase=3)
 
     # RLHF engine is responsible for creating models, loading checkpoints, ds-initialize models/optims/lr-schedulers
+    # 定义模型
     rlhf_engine = DeepSpeedRLHFEngine(
         actor_model_name_or_path=args.actor_model_name_or_path,
         critic_model_name_or_path=args.critic_model_name_or_path,
@@ -398,8 +440,9 @@ def main():
 
     ppo_trainer = DeepSpeedPPOTrainerUnsupervised if unsupervised_training_enabled else DeepSpeedPPOTrainer
     trainer = ppo_trainer(rlhf_engine, args)
-
-    # first number is how many experience-batch to generate, second number is the training batch size, which is the micro-batch size used
+    #* 流水线并行中的数据并行
+    # first number is how many experience-batch to generate,
+    #  second number is the training batch size, which is the micro-batch size used
     exp_mini_dataset = MiniDataset(args.generation_batch_numbers,
                                    args.per_device_mini_train_batch_size)
     unsup_mini_dataset = MiniDataset(args.generation_batch_numbers,
@@ -414,6 +457,7 @@ def main():
             args.global_rank)
         for step, (batch_prompt, batch_unsupervised) in enumerate(
                 zip(prompt_train_dataloader, unsupervised_train_dataloader)):
+            # 对unsupervised的数据进行micro数据切分
             batch_prompt = to_device(batch_prompt, device)
             if batch_unsupervised is not None:
                 batch_unsupervised = to_device(batch_unsupervised, device)
@@ -474,7 +518,7 @@ def main():
 
             if args.actor_gradient_checkpointing:
                 rlhf_engine.actor.gradient_checkpointing_disable()
-
+    #* 保存模型
     if args.output_dir is not None:
         print_rank_0('saving model ...')
         rlhf_engine.actor = convert_lora_to_linear_layer(rlhf_engine.actor)

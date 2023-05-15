@@ -47,13 +47,15 @@ class DeepSpeedRLHFEngine():
 
         self.actor = self._init_actor(
             actor_model_name_or_path=actor_model_name_or_path)
+        #? reference模型到底是什么->
         self.ref = self._init_ref(
             actor_model_name_or_path=actor_model_name_or_path)
+        #* actor模型的指数移动平均影子模型默认为None
         self.actor_ema = None
         if self.args.enable_ema:
             self.actor_ema = self._init_ema(
                 actor_model_name_or_path=actor_model_name_or_path)
-
+        #* critic和reward模型为同一个模型
         self.critic = self._init_critic(
             critic_model_name_or_path=critic_model_name_or_path)
         self.reward = self._init_reward(
@@ -62,9 +64,11 @@ class DeepSpeedRLHFEngine():
             self.critic.gradient_checkpointing_enable()
 
     def _init_actor(self, actor_model_name_or_path):
+        """初始化actor模型"""
         stime = log_init("Actor")
 
         # DS Config
+        #* actor模型应用zero优化的阶段1，2，3
         ds_config = get_train_ds_config(
             offload=self.args.offload,
             stage=self.args.actor_zero_stage,
@@ -116,6 +120,9 @@ class DeepSpeedRLHFEngine():
 
         # DeepSpeed Engine
         #TODO: move enable_hybrid_engine and pin_parameters to ds_config
+        # A tuple of ``engine``, ``optimizer``, ``training_dataloader``, ``lr_scheduler``
+        # ``engine``: DeepSpeed runtime engine which wraps the client model for distributed training.
+        # 如果存在optim,lr_scheduler, train_data则engine继承这些为方法或属性，否则均为None
         actor_engine, *_ = deepspeed.initialize(model=actor_model,
                                                 optimizer=optim,
                                                 lr_scheduler=lr_scheduler,
@@ -126,6 +133,7 @@ class DeepSpeedRLHFEngine():
         return actor_engine
 
     def _init_ref(self, actor_model_name_or_path):
+        """初始化reference模型，该模型的基本模型与actor一致，但不进行训练"""
         stime = log_init("Ref")
         # DS Config
         zero_stage = self.args.actor_zero_stage
@@ -152,6 +160,7 @@ class DeepSpeedRLHFEngine():
         return ref_engine
 
     def _init_ema(self, actor_model_name_or_path):
+        """初始化EMA模型，该模型仅记录actor模型的历史权重，执行EMA操作"""
         stime = log_init("EMA")
         # DS Config
         zero_stage = self.args.actor_zero_stage
@@ -182,6 +191,7 @@ class DeepSpeedRLHFEngine():
         return ema_engine
 
     def _init_critic(self, critic_model_name_or_path):
+        """初始化critic模型,critic模型需要训练，故加载完整的engine"""
         stime = log_init("Critic")
         ds_config = get_train_ds_config(offload=self.args.offload,
                                         stage=self.args.critic_zero_stage)
@@ -239,6 +249,7 @@ class DeepSpeedRLHFEngine():
         return critic_engine
 
     def _init_reward(self, critic_model_name_or_path):
+        """初始化reward模型，reward模型无需训练，故仅加载模型"""
         stime = log_init("Reward")
         # DS Config
         zero_stage = self.args.critic_zero_stage

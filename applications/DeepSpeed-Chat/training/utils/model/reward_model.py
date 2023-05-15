@@ -165,8 +165,8 @@ class RewardModel(nn.Module):
         rejected_mean_scores = torch.stack(rejected_mean_scores)
         return {
             "loss": loss,
-            "chosen_mean_scores": chosen_mean_scores,
-            "rejected_mean_scores": rejected_mean_scores,
+            "chosen_mean_scores": chosen_mean_scores, # bs * 1
+            "rejected_mean_scores": rejected_mean_scores, # bs * 1 
         }
     # 定义只返回得分不返回损失的函数
     def forward_value(self,

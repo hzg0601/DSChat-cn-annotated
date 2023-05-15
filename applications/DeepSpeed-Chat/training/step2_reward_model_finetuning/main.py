@@ -5,12 +5,19 @@
 脚本的流程基本如step1的训练流程，只是更换了模型的输出和评估标准，注释详见step1的main.py
 其核心为RewardModel类：
 RewardModel应为transformers的BaseModel,其返回值的一个为hidden_states
+
+（似乎与原始InstructGPT有异：在原始InstructGPT中，
+以由标注人员的排序为全部样本集，将任意两个prompt构成一组，
+靠前的一个奖励值减去靠后的一个奖励值作为损失函数）
+
 输入必须自带正负样本，前一半为正样本，后一半为负样本
 将最后一层映射为一个标量，然后将输出按正负样本分开；
-如果正样本与负样本对应位置间没有重复，则以num_padding位置或seq_len位置的得分为
-chosen和reject得分，以二者的差的sigmoid.mean()为损失
+如果正样本与负样本对应位置间没有重复：
+则以num_padding位置或seq_len位置的得分为
+chosen和reject得分，以二者的差的sigmoid.mean()为损失。
+如果正负样本对应位置间存在重复：
 则以(第一个重合的位置) 到 (num_padding的位置或seq_len的较大者)的值为chosen和reject的得分，
-以二者差的sigmoid.mean()为损失；
+以二者差的sigmoid.mean()为损失。
 训练时返回loss, chosen_score,reject_score;
 预测时返回标量值或(标量值+chosen_scores)
 
