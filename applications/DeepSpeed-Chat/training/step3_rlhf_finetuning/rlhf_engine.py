@@ -47,7 +47,7 @@ class DeepSpeedRLHFEngine():
 
         self.actor = self._init_actor(
             actor_model_name_or_path=actor_model_name_or_path)
-        #? reference模型到底是什么->
+        #? reference模型到底是什么-> sft模型
         self.ref = self._init_ref(
             actor_model_name_or_path=actor_model_name_or_path)
         #* actor模型的指数移动平均影子模型默认为None

@@ -248,7 +248,7 @@ def parse_args():
     parser.add_argument('--offload',
                         action='store_true',
                         help='Enable ZeRO Offload techniques.')
-    #? reference model是啥,按后文，与actor模型一致，应为offload技术的特征-> 
+    #? reference model是啥->即原文式2中的\pi^{SFT},即步骤1的sft模型，作为基准模型；log(RL/SFT)作为reward模型的惩罚项
     parser.add_argument(
         '--offload_reference_model',
         action='store_true',

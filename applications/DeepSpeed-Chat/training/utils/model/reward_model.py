@@ -76,7 +76,8 @@ class RewardModel(nn.Module):
         #                   Contains pre-computed hidden-states (key and values in the attention blocks) 
         #                   that can be used (see past_key_values input) to speed up sequential decoding.
         #? 由于没有传入label,因此其第一个返回值是logits(batch_size, sequence_length, config.vocab_size)
-        #? 此处的写法意思应是BaseModelOutput，第一个返回值为hidden_states
+        #? 此处的写法意思应是BaseModelOutput，第一个返回值为hidden_states->RewardModel调用的是AutoModel
+        #? 因此是预训练（而监督微调的）基础模型，故返回为BaseMdoelOutput, 
         transformer_outputs = self.rwtranrsformer(
             input_ids, # 就是输入的序列batch_size*seq_len
             past_key_values=past_key_values,
@@ -179,7 +180,11 @@ class RewardModel(nn.Module):
                       return_value_only=False,
                       prompt_length=0,
                       use_cache=False):
-
+        """
+        forward_value模型仅返回input_ids的得分,因其无需训练，因此无需reject样本;
+        若return_value_only=True,则返回所有token的得分,shape: batch_size * input_len;
+        若return_value_only=False，则返回最后一个非padding token的得分，shape：batch_size * 1;
+        """
         transformer_outputs = self.rwtranrsformer(
             input_ids,
             past_key_values=past_key_values,
@@ -190,7 +195,7 @@ class RewardModel(nn.Module):
         hidden_states = transformer_outputs[0]
         values = self.v_head(hidden_states).squeeze(-1)
         if return_value_only:
-            return values
+            return values # batch_size * input_len 
         else:
             # [0 0 0 0 prompt, answer, 0 0 0 0 ] for step 3, we have padding at the beginning
             # [prompt, answer, 0, 0, 0, 0] this is normal
@@ -199,6 +204,7 @@ class RewardModel(nn.Module):
             seq_len = input_ids.shape[1]
             chosen_end_scores = [
             ]  # we use this name for consistency with the original forward function
+            # 
             for i in range(bs):
                 input_id = input_ids[i]
                 value = values[i]
@@ -210,5 +216,5 @@ class RewardModel(nn.Module):
                 chosen_end_scores.append(value[c_ind - 1])
             return {
                 "values": values,
-                "chosen_end_scores": torch.stack(chosen_end_scores),
+                "chosen_end_scores": torch.stack(chosen_end_scores), # batch_size * 1
             }
