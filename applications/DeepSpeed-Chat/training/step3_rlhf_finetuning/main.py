@@ -471,6 +471,11 @@ def main():
             #     prompts = prompts[:, length - args.max_prompt_seq_len:]
             #     raise ValueError("Prompt length is too long")
 
+            #  根据给定的prompts和mask，先调用actor模型生成answer和mask
+            # 计算answer在actor_model、refernece_model下的logit;
+            # 计算answer在critic_model下的最后一个字符全部序列的得分，
+            # 在reward_model模型下计算序列最后一个实际字符的得分
+            # 返回全部中间及最终结果
             out = trainer.generate_experience(batch_prompt['prompt'],
                                               batch_prompt['prompt_att_mask'])
             exp_dataset = exp_mini_dataset.add(out)
@@ -486,11 +491,12 @@ def main():
                 for ppo_ep in range(args.ppo_epochs):
                     for i, (exp_data, unsup_data) in enumerate(
                             zip(exp_dataset, unsup_dataset)):
+                        # 调用train_rlhf,训练actor,critic模型 
                         actor_loss, critic_loss = trainer.train_rlhf(exp_data)
                         actor_loss_sum += actor_loss.item()
                         critic_loss_sum += critic_loss.item()
                         average_reward += exp_data["rewards"].mean()
-
+                        # 调用train_unsupervised训练actor模型
                         if unsupervised_training_enabled:
                             unsup_loss = trainer.train_unsupervised(
                                 unsup_data, args.unsup_coef)
@@ -508,13 +514,11 @@ def main():
                 print_rank_0(
                     f'epoch: {epoch}|step: {step}|ppo_ep: {ppo_ep+1}|act_loss: {actor_loss_sum/inner_iter}|cri_loss: {critic_loss_sum/inner_iter}|unsuper_loss: {unsup_loss_sum/inner_iter}',
                     args.global_rank)
+
                 average_reward = get_all_reduce_mean(average_reward).item()
-                print_rank_0(
-                    f"average reward score: {average_reward/inner_iter}",
-                    args.global_rank)
-                print_rank_0(
-                    "-------------------------------------------------------------------------------------",
-                    args.global_rank)
+
+                print_rank_0(f"average reward score: {average_reward/inner_iter}",args.global_rank)
+                print_rank_0("-----------------------------------------------------",args.global_rank)
 
             if args.actor_gradient_checkpointing:
                 rlhf_engine.actor.gradient_checkpointing_disable()
