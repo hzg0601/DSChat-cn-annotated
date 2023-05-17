@@ -392,6 +392,7 @@ class DataCollatorRLHF:
             batch["prompt_att_mask"] = prompt_mask
         # torch.flip是反序地复制一份新的数据，这一点与NumPy不同，NumPy是返回一个view，因而使用torch.flip耗时更久。
         #? 按第1维翻转,但为什么要翻转-> GPT generation中要求右对齐、左补齐，因为generate是从最后一个字符开始自回归生成
+        #! 与transformers的Tokenizer不同，transformers的Tokenizer就是单纯地左补齐，并不翻转顺序
         # We have to do padding at right here because further it flips and becomes left-padded. 
         # So finally prompt batch becomes right-aligned and left-padded as usually required for GPT generation.
         
