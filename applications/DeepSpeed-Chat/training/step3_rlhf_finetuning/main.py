@@ -2,7 +2,33 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 """
+准备阶段：
+#* 1. 定义分布式训练的device,rank,同步各端通信;
+#* 2. 基于actor模型加载tokenizer，构造训练数据;
+#* 3. 调用DeepSpeedRLHFEngine构造RLHF的deepspeed engine，其包含actor,ref,critic,reward四个engine;
+#* 4. 基于RLHF的engine，调用PPOTrainer(PPOTrainerUnsupervised)类构造ppo(ppp-ptx)的训练实例
+#* 5. 定义MiniDataset实例，每次搜集generation_batch_numbers个mini-batch,
+    #* 然后将它们统一分割为per_device_mini_train_batch_size大小的micro-batch;
+训练阶段：
+#* 6. 对unsupervised的数据进行micro数据切分；
+#* 7. 调用ppotrainer的generate_experience方法，
+    #* 根据给定的prompts和mask，先调用actor模型生成answer和mask,然后计算answer在actor,ref模型下的logit;
+    #* 计算answer在critic_model下的最后一个字符全部序列的得分，在reward_model模型下chosen序列最后一个实际字符的得分，
+    #* 返回全部中间及最终结果；
+#* 8. 调用MiniDataset类，将generate_experience返回的mini-batch继续分割为micro-batch；
+    #* **在将mini-batch的个数搜集到max_size个时才开始ppo训练**
+#* 9. 根据args启动actor模型的梯度检查点方法；
+#* 10. 根据args.定义的ppo训练epochs训练ppo模型：
+    #* 11. 对每个micro-batch调用ppotrainer的train_rlhf方法训练模型，并返回actor_loss和critic_loss；
+    #* 12.调用ppotrainer的train_unsupervised针对unsupervised数据训练actor模型，并返回unsup_loss；
+    #* 13. 根据args.ema参数启动移动平均方法更新模型权重；
+#* 14. ppo_epochs训练完毕后，调用all_reduce方法计算全局平均奖励；
+#* 15. ppo_epochs训练完毕后，根据args.actor_gradient_checkpointing参数在训练完毕后关闭actor的梯度检查点功能；
+#* 16. 根据lora、ema、actor_zero_stage等参数保存actor,critic,actor_ema模型。
 
+问题：
+1. 数据组装时为什么flip;
+2. 数据gather时，为什么-1;
 """
 # DeepSpeed Team
 """
@@ -236,7 +262,9 @@ def parse_args():
         help=
         "Tensor-parallelism degree used for the inference-optimization. Please note hybrid-engine need to be enabled when using this feature."
     )
-    #? 在混合engine中，张量并行分片里引入到层中的粒度
+    #? 在混合engine中，张量并行分片里引入到层中的粒度-> 这里应该是将tensor parallelism和model parallelism等价了
+    #? 但按Megatron-LM和GPipe,分别称为TensorParallelism和Pipeline Parallelism,均是为模型并行
+    #? micro-batch的术语是在Pipeline Parallelism提到的，或者micro-batch也可以用在TensorParallelism?
     parser.add_argument(
         "--tp_gather_partition_size",
         type=int,
@@ -338,7 +366,17 @@ def parse_args():
 
 
 def create_datasets(args, tokenizer, train_phase=3):
-    
+    """
+    构造step3的数据集，包括两部分：PPO训练的数据集和unsupervised pretrain训练的数据集,步骤为：
+    1. 根据config文件确定是否启动unsupervised_training,如是则根据config获取unsupervised训练数据；
+    2. 构造prompt_train数据的Dataset类；
+    3. 定义RLHF数据collator，其作用是以给定的pad_token将矩阵填充至最长句子的长度或max_token_len；
+       无监督数据仍按默认collator组装数据（主要是padding)默认为torch_default_data_collator,
+       即将所有数据统一为tensor,然后将标签的key变为'label'
+    4. 调用Sampler和Dataloader组装数据；
+    5. 计算每个epoch权重更新的次数和总更新次数；
+
+    """
     unsupervised_training_enabled = args.unsupervised_dataset_name and args.unsupervised_dataset_config_name
     prompt_train_dataset, _ = create_prompt_dataset(
         args.local_rank, args.data_path, args.data_split,
@@ -351,7 +389,7 @@ def create_datasets(args, tokenizer, train_phase=3):
         unsupervised_train_dataset = None
 
     # DataLoaders creation:
-    # 将给定的pad_token填充至最长句子的长度或max_token_len
+    # 根据给定的pad_token填充至最长句子的长度或max_token_len
     data_collator = DataCollatorRLHF(args.max_prompt_seq_len,
                                      args.inference_tp_size)
     if args.local_rank == -1:
@@ -394,6 +432,7 @@ def create_datasets(args, tokenizer, train_phase=3):
 
 def main():
     args = parse_args()
+    #* 1. 定义分布式训练的device,rank,同步各端通信
 
     if args.local_rank == -1:
         device = torch.device("cuda")
@@ -409,7 +448,8 @@ def main():
 
     unsupervised_training_enabled = args.unsupervised_dataset_name and args.unsupervised_dataset_config_name
     if unsupervised_training_enabled:
-        # if we enable unsupervised training, we need to double the batch size for actor model
+        #? if we enable unsupervised training, we need to double the batch size for actor model
+        #? 为什么可以先后训练？
         args.gradient_accumulation_steps_actor = args.gradient_accumulation_steps * 2
     else:
         args.gradient_accumulation_steps_actor = args.gradient_accumulation_steps
@@ -418,7 +458,7 @@ def main():
     set_random_seed(args.seed)
     # 同步各节点的通信
     torch.distributed.barrier()
-
+    #* 2. 基于actor模型加载tokenizer，构造训练数据
     # create common tokenizer based on actor model
     tokenizer = load_hf_tokenizer(args.actor_model_name_or_path,
                                   fast_tokenizer=True)
@@ -428,27 +468,32 @@ def main():
         args=args, tokenizer=tokenizer, train_phase=3)
 
     # RLHF engine is responsible for creating models, loading checkpoints, ds-initialize models/optims/lr-schedulers
-    # 定义模型
+    #* 3. 调用DeepSpeedRLHFEngine构造RLHF的deepspeed engine，其包含actor,ref,critic,reward四个engine
     rlhf_engine = DeepSpeedRLHFEngine(
         actor_model_name_or_path=args.actor_model_name_or_path,
         critic_model_name_or_path=args.critic_model_name_or_path,
         tokenizer=tokenizer,
         num_total_iters=num_total_iters,
         args=args)
-
+    #? 自定义 end_of_conversation_token
     args.end_of_conversation_token = "<|endoftext|>"
-
+    #* 4. 基于RLHF的engine，调用PPOTrainer(PPOTrainerUnsupervised)类构造ppo(ppp-ptx)的训练实例
     ppo_trainer = DeepSpeedPPOTrainerUnsupervised if unsupervised_training_enabled else DeepSpeedPPOTrainer
     trainer = ppo_trainer(rlhf_engine, args)
     #* 流水线并行中的数据并行
     # first number is how many experience-batch to generate,
     #  second number is the training batch size, which is the micro-batch size used
+    #* 5. 定义MiniDataset实例，每次搜集generation_batch_numbers个mini-batch,
+    #* 然后将它们统一分割为per_device_mini_train_batch_size大小的micro-batch
+    # 其作用是先搜集max_size个mini-batch,
+    #然后将每个mini-batch分割为small_batch_size个较小的micro-batch，
+    #组成一个list返回
     exp_mini_dataset = MiniDataset(args.generation_batch_numbers,
                                    args.per_device_mini_train_batch_size)
     unsup_mini_dataset = MiniDataset(args.generation_batch_numbers,
                                      args.per_device_mini_train_batch_size)
 
-    # Train!
+    #* Train!
     print_rank_0("***** Running training *****", args.global_rank)
 
     for epoch in range(args.num_train_epochs):
@@ -457,7 +502,7 @@ def main():
             args.global_rank)
         for step, (batch_prompt, batch_unsupervised) in enumerate(
                 zip(prompt_train_dataloader, unsupervised_train_dataloader)):
-            # 对unsupervised的数据进行micro数据切分
+            #* 6. 对unsupervised的数据进行micro数据切分
             batch_prompt = to_device(batch_prompt, device)
             if batch_unsupervised is not None:
                 batch_unsupervised = to_device(batch_unsupervised, device)
@@ -476,19 +521,26 @@ def main():
             # 计算answer在critic_model下的最后一个字符全部序列的得分，
             # 在reward_model模型下计算序列最后一个实际字符的得分
             # 返回全部中间及最终结果
+            #* 7. 调用ppotrainer的generate_experience方法，
+            #* 根据给定的prompts和mask，先调用actor模型生成answer和mask,然后计算answer在actor,ref模型下的logit;
+            #* 计算answer在critic_model下的最后一个字符全部序列的得分，在reward_model模型下chosen序列最后一个实际字符的得分，
+            #* 返回全部中间及最终结果
             out = trainer.generate_experience(batch_prompt['prompt'],
                                               batch_prompt['prompt_att_mask'])
+            #* 8. 调用MiniDataset类，将generate_experience返回的mini-batch继续分割为micro-batch
+            #* 在将mini-batch的个数搜集到max_size个时才开始ppo训练
             exp_dataset = exp_mini_dataset.add(out)
 
             if exp_dataset is not None:
                 inner_iter = 0
                 actor_loss_sum, critic_loss_sum, unsup_loss_sum = 0, 0, 0
                 average_reward = 0
-
+                #* 9. 根据args启动actor模型的梯度检查点方法
                 if args.actor_gradient_checkpointing:
                     rlhf_engine.actor.gradient_checkpointing_enable()
-
+                #* 10. 根据args.定义的ppo训练epochs训练ppo模型
                 for ppo_ep in range(args.ppo_epochs):
+                    #* 11. 对每个micro-batch调用ppotrainer的train_rlhf方法训练模型，并返回actor_loss和critic_loss
                     for i, (exp_data, unsup_data) in enumerate(
                             zip(exp_dataset, unsup_dataset)):
                         # 调用train_rlhf,训练actor,critic模型 
@@ -496,14 +548,17 @@ def main():
                         actor_loss_sum += actor_loss.item()
                         critic_loss_sum += critic_loss.item()
                         average_reward += exp_data["rewards"].mean()
-                        # 调用train_unsupervised训练actor模型
+                        #* 12.调用ppotrainer的train_unsupervised针对unsupervised数据训练actor模型，并返回unsup_loss
+                        # PPO-ptx
                         if unsupervised_training_enabled:
                             unsup_loss = trainer.train_unsupervised(
                                 unsup_data, args.unsup_coef)
                             unsup_loss_sum += unsup_loss.item()
 
                         inner_iter += 1
+                        #* 13. 根据args.ema参数启动移动平均方法更新模型权重
                         if args.enable_ema:
+                            # 调用moving_average更新actor模型权重
                             moving_average(rlhf_engine.actor,
                                            rlhf_engine.actor_ema,
                                            zero_stage=args.actor_zero_stage)
@@ -514,15 +569,31 @@ def main():
                 print_rank_0(
                     f'epoch: {epoch}|step: {step}|ppo_ep: {ppo_ep+1}|act_loss: {actor_loss_sum/inner_iter}|cri_loss: {critic_loss_sum/inner_iter}|unsuper_loss: {unsup_loss_sum/inner_iter}',
                     args.global_rank)
+                # 分布式训练一般分为同步训练和异步训练，
+                # 同步训练中所有的worker读取mini-batch的不同部分，同步计算损失函数的gradient，最后将每个worker的gradient整合之后更新模型。
+                # 异步训练中每个worker独立读取训练数据，异步更新模型参数。
+                # 通常同步训练利用AllReduce来整合不同worker计算的gradient，异步训练则是基于参数服务器架构（parameter server）
 
+                # AllReduce其实是一类算法，目标是高效得将不同机器中的数据整合（reduce）之后再把结果分发给各个机器。
+                # 在深度学习应用中，数据往往是一个向量或者矩阵，通常用的整合则有Sum、Max、Min等。
+                # AllReduce具体实现的方法有很多种，最单纯的实现方式就是每个worker将自己的数据发给其他的所有worker，然而这种方式存在大量的浪费。
+                # 一个略优的实现是利用主从式架构，将一个worker设为master，其余所有worker把数据发送给master之后，
+                # 由master进行整合元算，完成之后再分发给其余worker。不过这种实现master往往会成为整个网络的瓶颈。
+                # Ring AllReduce算法分为两个阶段。第一阶段，将N个worker分布在一个环上，并且把每个worker的数据分成N份。
+                # 第k个worker会把第k份数据发给下一个worker，同时从前一个worker收到第k-1份数据。
+                # 之后worker会把收到的第k-1份数据和自己的第k-1份数据整合，再将整合的数据发送给下一个worker。
+                # 以此循环N次之后，每一个worker都会包含最终整合结果的一份。
+                # 第二阶段，每个worker将整合好的部分发送给下一个worker。worker在收到数据之后更新自身数据对应的部分即可。
+                # 假设每个worker的数据是一个长度为S的向量，那么个Ring AllReduce里，每个worker发送的数据量是O(S)，和worker的数量N无关。
+                #* 14. ppo_epochs训练完毕后，调用all_reduce方法计算全局平均奖励
                 average_reward = get_all_reduce_mean(average_reward).item()
 
                 print_rank_0(f"average reward score: {average_reward/inner_iter}",args.global_rank)
                 print_rank_0("-----------------------------------------------------",args.global_rank)
-
+            #* 15. 在ppo_epochs训练完毕，根据args.actor_gradient_checkpointing参数在训练完毕后关闭actor的梯度检查点功能。
             if args.actor_gradient_checkpointing:
                 rlhf_engine.actor.gradient_checkpointing_disable()
-    #* 保存模型
+    #* 16. 根据lora、ema、actor_zero_stage等参数保存actor,critic,actor_ema模型
     if args.output_dir is not None:
         print_rank_0('saving model ...')
         rlhf_engine.actor = convert_lora_to_linear_layer(rlhf_engine.actor)

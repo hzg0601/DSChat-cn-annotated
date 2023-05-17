@@ -346,21 +346,25 @@ class DataCollatorReward:
 
 
 class DataCollatorRLHF:
-    """将给定的pad_token填充至最长句子的长度或max_token_len"""
+    """根据给定的pad_token将每个句子填充至最长句子的长度或max_token_len
+    max_token_len: 句子的最大长度；
+    inference_tp_size: 
+    """
     def __init__(self, max_token_len, inference_tp_size):
         self.max_token_len = max_token_len
         self.inference_tp_size = inference_tp_size
 
     def __call__(self, data):
         batch = {}
-        #? 最后一个句子的最后一个元素必为pad_token
-        #? 若如此，数据必然是一个list或tuple，第一个为句子，第二个为待的mask序列，最后一个为pad_token
+        #? 最后一个样本的最后一个元素必为pad_token
+        #? 若如此，样本必然是一个list或tuple，第一个为句子，第二个为mask序列，最后一个为pad_token
         pad_token_id = data[-1][-1]
         #  Tensor of size T x B x * if batch_first is False. Tensor of size B x T x * otherwise
         # B is batch size. It is equal to the number of elements in sequences. 
         # T is length of the longest sequence. 
         # L is length of the sequence. 
         # * is any number of trailing dimensions, including none.
+        # * pad_seqence将每个句子padding至最长句子的长度
         prompt = pad_sequence([f[0] for f in data],
                               padding_value=pad_token_id,
                               batch_first=True)
@@ -369,7 +373,7 @@ class DataCollatorRLHF:
                                    batch_first=True)
 
         ### make sure the final ouput is a seqence of 2**?
-        #? T即最长句子的长度
+        #? T=length即最长句子的长度
         length = prompt.size()[-1]
         #? 如果需要pad的长度大于句子的长度，则继续pad至max_token_len
         
@@ -387,7 +391,12 @@ class DataCollatorRLHF:
             batch["prompt"] = prompt
             batch["prompt_att_mask"] = prompt_mask
         # torch.flip是反序地复制一份新的数据，这一点与NumPy不同，NumPy是返回一个view，因而使用torch.flip耗时更久。
-        #? 按第1维翻转,但为什么要翻转->
+        #? 按第1维翻转,但为什么要翻转-> GPT generation中要求右对齐、左补齐，因为generate是从最后一个字符开始自回归生成
+        # We have to do padding at right here because further it flips and becomes left-padded. 
+        # So finally prompt batch becomes right-aligned and left-padded as usually required for GPT generation.
+        
+        # One thing to remember is that generate() will always auto-regressively sample from the last token. 
+        # This means that if the last token is a padding token than it will sample from it which is always incorrect.
         batch["prompt"] = batch["prompt"].flip(1)
         batch["prompt_att_mask"] = batch["prompt_att_mask"].flip(1)
         return batch
@@ -447,6 +456,11 @@ def get_unsupervised_data(args, tokenizer):
 
 
 class MiniDataset:
+    """
+    先搜集max_size个mini-batch,
+    然后将每个mini-batch分割为small_batch_size个较小的micro-batch，
+    组成一个list返回
+    """
 
     def __init__(self, max_size, small_batch_size):
         self.dataset = []
@@ -454,6 +468,11 @@ class MiniDataset:
         self.small_batch_size = small_batch_size
 
     def seperate(self):
+        """
+        将dataset的每个large_batch（共max_size个）以small_batch_size划分
+        返回一个list,每个元素是一个small_batch_size大小的micro-batch
+        分割后释放dataset.
+        """
         small_dataset = []
         for large_batch in self.dataset:
             if type(large_batch) == list or type(large_batch) == tuple:
@@ -472,13 +491,18 @@ class MiniDataset:
                         for k, v in large_batch.items()
                     })
                 else:
-                    small_dataset.append(large_batch[i:i +
-                                                     self.small_batch_size])
+                    small_dataset.append(large_batch[i:i +self.small_batch_size])
         self.free()
 
         return small_dataset
 
     def add(self, data):
+        """
+        如果数据集的长度小于最大长度，则将数据加入dataset中,直到达到max_size;
+        达到max_size后将每个mini-batch按照small_batch_size进行分割，
+        即每个micro-batch的size为small_batch_size;
+
+        """
         if len(self.dataset) < self.max_size:
             self.dataset.append(data)
             if len(self.dataset) == self.max_size:

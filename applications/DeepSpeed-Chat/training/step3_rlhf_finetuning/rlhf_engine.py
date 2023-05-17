@@ -38,6 +38,11 @@ def log_init(model_name, stime=None):
 
 
 class DeepSpeedRLHFEngine():
+    """
+    1. 根据actor模型调用deepspeed.initialize定义初始化actor_model,ref_model的deepspeed的engine;
+    2. 根据reward模型调用deepspeed.initialize定义初始化critic_model,reward_model的deepspeed的engine
+    3. 四者共同作为DeepSpeedRLHFEngine的属性
+    """
 
     def __init__(self, actor_model_name_or_path, critic_model_name_or_path,
                  tokenizer, args, num_total_iters):
