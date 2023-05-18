@@ -95,6 +95,28 @@ chosen和reject得分，以二者的差的sigmoid.mean()为损失。
 7. ppo\_epochs训练完毕后，根据args.actor\_gradient\_checkpointing参数在训练完毕后关闭actor的梯度检查点功能；
 8. 根据lora、ema、actor\_zero\_stage等参数保存actor,critic,actor\_ema模型。
 
+该脚本的核心是PPO训练类，该类的主方法为train_rlhf,主要流程如下：
+
+    0. 前置调用generate_experience方法，令actor,ref,reward,critic模型生成:
+    answer_seq, 
+    actor针对answer_seq除第一个外所有token的logit:log_probs,
+    ref针对answer_seq除第一个外所有token的logit:ref_log_probs,
+    reward针对answer_seq最后一个非padding token的得分:rewards，
+    critic针对answer_seq去除最后一个token（bos_token）的原始得分:values, 重命名为old_values
+    
+    1. 首先根据log_probs和ref_log_probs, reward调用compute_reward计算公式2的PPO目标损失
+        首先计算actor_model和reference_model针对answer的嵌入的logits的差，乘以-\beta 即KL奖励系数
+        然后加上每个answer最后一个非padding token的得分，即文中的公式2,作为actor模型的奖励
+    2. 然后调用get_advantages_and_returns计算PPO模型更新所需的advantages, returns；
+        advantage函数衡量的是从某个状态s_t出发，自主选择一个动作比根据策略抽取一个动作所带来的奖励有多大，
+        即状态-动作值函数和状态函数的差. critic模型针对answer_seq去除bos_token作为每个原模型的值函数，
+        值函数+动作奖励，即得到reward序列
+    3. 然后再调用actor模型计算对answer_seq除第一个外所有token的logit:actor_log_probs，作为新模型的输出
+    4. 基于log_probs, actor_log_probs, andvantage计算actor模型的损失函数；
+    5. 再调用critic模型计算answer_seq除最后一个外所有token的得分values，
+    6. 基于values, old_values, return计算critic模型的损失函数；
+    7. 更新actor critic模型。
+
 ## 2. Training
 
 There are several training and finetuning examples so please see the individual folders for specific instructions.

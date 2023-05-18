@@ -1,6 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
-
+"""
+1. 根据actor模型调用deepspeed.initialize定义初始化actor_model,ref_model的deepspeed的engine;
+2. 根据reward模型调用deepspeed.initialize定义初始化critic_model,reward_model的deepspeed的engine
+3. 四者共同作为DeepSpeedRLHFEngine的属性
+"""
 # DeepSpeed Team
 import time
 import torch

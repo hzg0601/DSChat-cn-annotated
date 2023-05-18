@@ -1,6 +1,27 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
+"""
+    0. 前置调用generate_experience方法，令actor,ref,reward,critic模型生成:
+    answer_seq, 
+    actor针对answer_seq除第一个外所有token的logit:log_probs,
+    ref针对answer_seq除第一个外所有token的logit:ref_log_probs,
+    reward针对answer_seq最后一个非padding token的得分:rewards，
+    critic针对answer_seq去除最后一个token（bos_token）的原始得分:values, 重命名为old_values
+    
+    1. 首先根据log_probs和ref_log_probs, reward调用compute_reward计算公式2的PPO目标损失
+        首先计算actor_model和reference_model针对answer的嵌入的logits的差，乘以-\beta 即KL奖励系数
+        然后加上每个answer最后一个非padding token的得分，即文中的公式2,作为actor模型的奖励
+    2. 然后调用get_advantages_and_returns计算PPO模型更新所需的advantages, returns；
+        advantage函数衡量的是从某个状态s_t出发，自主选择一个动作比根据策略抽取一个动作所带来的奖励有多大，
+        即状态-动作值函数和状态函数的差. critic模型针对answer_seq去除bos_token作为每个原模型的值函数，
+        值函数+动作奖励，即得到reward序列
+    3. 然后再调用actor模型计算对answer_seq除第一个外所有token的logit:actor_log_probs，作为新模型的输出
+    4. 基于log_probs, actor_log_probs, andvantage计算actor模型的损失函数；
+    5. 再调用critic模型计算answer_seq除最后一个外所有token的得分values，
+    6. 基于values, old_values, return计算critic模型的损失函数；
+    7. 更新actor critic模型。
 
+"""
 # DeepSpeed Team
 import torch
 import torch.nn.functional as F
@@ -95,10 +116,11 @@ class DeepSpeedPPOTrainer():
         # NOTE: this will causes each GPU has different number of examples
         batch_size = seq.shape[0]
         prompt_length = prompts.shape[1]
-        ans = seq[:, prompt_length:]
+        ans = seq[:, prompt_length:] #* 由此可以看出transformers的generate方法返回的前一部分是seq
         self.prompt_length = prompt_length
         valid_ans_len = (ans != self.tokenizer.pad_token_id).sum(dim=-1)
         out_seq = []
+        #* 生成以后的计算以seq为基准，与prompts无关
         for i in range(batch_size):
             if valid_ans_len[
                     i] <= 1:  # if the answer is shorter than 1 token, drop it
@@ -136,10 +158,13 @@ class DeepSpeedPPOTrainer():
             #* 4. 调用reward模型计算答案最后一个非padding token的得分，
             #* 调用critic模型计算答案的最后一个token的原始得分
             # 计算actor返回序列的奖励值，
+            #* 计算reward_score时使用的是最后一个实意字符，因此无需再进行计算，其返回的shape为batch_size * 1
             reward_score = self.reward_model.forward_value(
                 seq, attention_mask,prompt_length=self.prompt_length)['chosen_end_scores'].detach()
             # RewardModel类的只返回得分不返回损失的函数,是最后一层映射的结果 batch_size * seq 
             # 返回的是batch_size * seq的tensor,不取最后一个得分，不考虑pad_token的位置等因素
+            #* 由于在前置数据处理中，数据进行了翻转，而默认的数据格式第一个字符为bos_token，因此不取最后一个字符
+            #! ? critic_model.forward_values为什么可以作为值函数->它衡量了模型如果遵循actor初始模型的输出在各个token得到的奖励值
             values = self.critic_model.forward_value(
                 seq, attention_mask, return_value_only=True).detach()[:, :-1] # batch_size * (answer_len -1)
         #* 5. 计算actor模型和reference模型的logits
@@ -151,7 +176,8 @@ class DeepSpeedPPOTrainer():
         return {
             'prompts': prompts,
             #? logits[:,:-1,:] batch_size * answer_len -1 * dict_size, 去掉最后一个token
-            #? 因为flip函数
+            #? 因为flip函数->seq的第一个字符为bos_token，故取seq[:,1:],而返回的logit是翻转后的，因此取[:, :-1, :]
+            #? 再调用gather函数，即得到seq中除bos外的所有token的logit。
             'logprobs': gather_log_probs(logits[:, :-1, :], seq[:, 1:]), # actor模型的seq的除第一个外每个token概率
             'ref_logprobs': gather_log_probs(logits_ref[:, :-1, :], seq[:,1:]), # 返回维度为batch_size * (answer_len -1)
             'value': values, # RewardModel中v_head返回的最后个token的得分，不考虑pad_token的位置,batch_size * (answer_len -1)
@@ -184,7 +210,7 @@ class DeepSpeedPPOTrainer():
             # start: ends[j]每个序列promp_seq_len -1 : answer最后一个非padding字符的位置
             # rewards[j,start:ends[j]][-1] answer最后一个字符的kl_divergence
             rewards[j, start:ends[j]][-1] += reward_clip[j]
-
+        #* rewards最后一个实意token的值为论文公式2的结果，其他仍为KL得分
         return rewards # batch_size * (answer_len - 1)
 
     def train_rlhf(self, inputs):
@@ -194,7 +220,7 @@ class DeepSpeedPPOTrainer():
         actor针对answer_seq除第一个外所有token的logit:log_probs,
         ref针对answer_seq除第一个外所有token的logit:ref_log_probs,
         reward针对answer_seq最后一个非padding token的得分:rewards，
-        critic针对answer_seq最后一个token的原始得分:values, 重命名为old_values
+        critic针对answer_seq去除最后一个token的原始得分:values, 重命名为old_values
         
         1. 首先根据log_probs和ref_log_probs, reward调用compute_reward计算公式2的PPO目标损失
         2. 然后调用get_advantages_and_returns计算PPO模型更新所需的advantages, returns；
@@ -216,7 +242,7 @@ class DeepSpeedPPOTrainer():
         seq = inputs['input_ids']
         # start = prompt_seq_len - 1
         start = prompts.size()[-1] - 1
-        #? action_mask 去除第一个token,默认第一个为padding token?
+        #? action_mask 去除第一个token,默认第一个为padding token-> bos_token
         action_mask = attention_mask[:, 1:]
 
         old_values = values # batch_size * (answer_len -1)
@@ -232,11 +258,13 @@ class DeepSpeedPPOTrainer():
         ### process the new outputs
         batch = {'input_ids': seq, "attention_mask": attention_mask}
         #* 再计算一次actor模型针对 answer_seq的log_prob
+        #? 为什么再计算一次？模型并没有更新啊?-> 模型梯度没有更新，但选择的动作变了，从而可以评估当前动作的奖励
         # 计算actor_model针对answer_seq的logit, batch_size * (answer_len ) 
         actor_prob = self.actor_model(**batch, use_cache=False).logits
         # 先softmax，然后取出seq[:,1:]对应的概率，得到一个batch_size *(answer_len -1) 
         actor_log_prob = gather_log_probs(actor_prob[:, :-1, :], seq[:, 1:])
         # 计算actor模型损失函数
+        #? 为什么从start开始-> transformers的genreate方法生成的结果的前一部分是原始的prompts
         actor_loss = self.actor_loss_fn(actor_log_prob[:, start:],
                                         log_probs[:, start:], advantages,
                                         action_mask[:, start:])
@@ -258,9 +286,18 @@ class DeepSpeedPPOTrainer():
 
     def actor_loss_fn(self, logprobs, old_logprobs, advantages, mask):
         ## policy gradient loss
+        # 策略输出KL散度，TRPO的基本思想是限制每次策略梯度的更新步长，
+        # 该更新由两个连续概率分布的Kullback-Leibler（KL）散度度量
         log_ratio = (logprobs - old_logprobs) * mask
         ratio = torch.exp(log_ratio)
+        # policy gradient loss
         pg_loss1 = -advantages * ratio
+        # 在梯度函数中添加clip操作，称为PPO2。其实现的原理是，当优势函数的值为正，
+        # 即需要加强对当前动作的选择机率时，将会对两分布在当前状态和动作下的比值的最大值进行约束，
+        # 如果最大值超过阈值，则停止对策略的更新， 
+        # 当优势函数的值为负，即需要减小对当前动作的选择机率时，
+        # 将会对两分布在当前状态和动作下的比值的最小值进行约束，如果最小值超过阈值，也停止对策略的更新。
+        # 通过这种方式，实现了在参数更新的同时保证两分布之间距离在设定范围内。
         pg_loss2 = -advantages * torch.clamp(ratio, 1.0 - self.cliprange,
                                              1.0 + self.cliprange)
         pg_loss = torch.sum(torch.max(pg_loss1, pg_loss2) * mask) / mask.sum()
@@ -268,6 +305,8 @@ class DeepSpeedPPOTrainer():
 
     def critic_loss_fn(self, values, old_values, returns, mask):
         ## value loss
+        #? 根据计算的值函数V_(ϕ_k )和当前奖励R ̂_k利用回归方法更新值函数的参数->
+        #? 此处使用了与actor一致的损失
         values_clipped = torch.clamp(
             values,
             old_values - self.cliprange_value,
@@ -280,6 +319,12 @@ class DeepSpeedPPOTrainer():
         return vf_loss
 
     def get_advantages_and_returns(self, values, rewards, start):
+        """
+        强化学习另一个核心的概念就是优势函数（advantage function），
+        它衡量的是从某个状态s_t出发，自主选择一个动作比根据策略抽取一个动作所带来的奖励有多大，
+        即状态-动作值函数和状态函数的差.
+        """
+        #? 为什么从start开始?-> transformers的genreate方法生成的结果的前一部分是原始的prompts
         # Adopted from https://github.com/CarperAI/trlx/blob/main/trlx/models/modeling_ppo.py#L134
         lastgaelam = 0
         advantages_reversed = []
@@ -291,12 +336,20 @@ class DeepSpeedPPOTrainer():
             nextvalues = values[:, t + 1] if t < length - 1 else 0.0
             # rewards除最后一个外，都是KL
             # 第t个token的KL+下一个token的score*gamma - token的score
+            #? 这里reward,nextvalues * self.gamma代表什么？与values的减法代表什么?-> 
+            #? reward表示选择当前动作的奖励
+            #? nextvalues表示在选择当前动作以后，执行原有策略的奖励，考虑到奖励的贴现，故*self.gamma
+            #? values表示动作一直遵循原策略的奖励，即值函数
+            #? rewards[:, t] + self.gamma * nextvalues表示动作状态值函数，values表示值函数
             delta = rewards[:, t] + self.gamma * nextvalues - values[:, t]
-            # 
+            #? lastgaelam是什么意思
+            #? 相当于动作奖励加上上一次奖励的贴现
             lastgaelam = delta + self.gamma * self.lam * lastgaelam
             advantages_reversed.append(lastgaelam)
         # list[::-1]反序
+        #? 与prompts无关为什么还要反序？是PPO算法的特性吗-> advantage是从最后一个动作开始评估
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
+        #? advantage + values = 状态动作值函数，即每个token的动作奖励
         returns = advantages + values[:, start:]
         return advantages.detach(), returns
 
@@ -339,7 +392,7 @@ class DeepSpeedPPOTrainerUnsupervised(DeepSpeedPPOTrainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-    #? 为什么可以分块训练，分开训练的梯度更新与联合训练的梯度更新一致吗？
+    #? 为什么可以分开训练，分开训练的梯度更新与联合训练的梯度更新一致吗？
     def train_unsupervised(self, inputs, unsup_coef):
         # Train the unsupervised model here
         self._validate_training_mode()

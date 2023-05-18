@@ -336,12 +336,8 @@ class DataCollatorReward:
 
     def __call__(self, data):
         batch = {}
-        batch["input_ids"] = torch.cat([f[0]
-                                        for f in data] + [f[2] for f in data],
-                                       dim=0)
-        batch["attention_mask"] = torch.cat([f[1] for f in data] +
-                                            [f[3] for f in data],
-                                            dim=0)
+        batch["input_ids"] = torch.cat([f[0] for f in data] + [f[2] for f in data],dim=0)
+        batch["attention_mask"] = torch.cat([f[1] for f in data] +[f[3] for f in data],dim=0)
         return batch
 
 
