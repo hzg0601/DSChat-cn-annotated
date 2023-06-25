@@ -284,7 +284,6 @@ def main():
     # If passed along, set the training seed now.
     set_random_seed(args.seed)
 
-    assert not args.offload, "zero-offload is not currently supported but coming soon!"
     #  Pytorch在分布式训练过程中，对于数据的读取是采用主进程预读取并缓存，
     # 然后其它进程从缓存中读取，不同进程之间的同步通信需要通过torch.distributed.barrier()实现
     # 主要就是通过对其他进程进行阻塞来等所有的进程的计算都完毕之后在进行后续的计算。
@@ -296,7 +295,8 @@ def main():
     # eos_token 是 tokenizer 中用于表示序列结束的标记,默认是 [SEP]。
     # 所以,这个设置就是指定我们使用 [SEP] 标记来进行补充填充,而不是默认的 [PAD] 标记。
     tokenizer.pad_token = tokenizer.eos_token
-    # 加载模型
+    # make sure tokenizer is right pad in our logic
+    tokenizer.padding_side = 'right'
     model = create_hf_model(AutoModelForCausalLM,
                             args.model_name_or_path,
                             tokenizer,

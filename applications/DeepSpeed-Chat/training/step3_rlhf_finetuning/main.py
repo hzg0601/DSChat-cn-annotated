@@ -444,8 +444,6 @@ def main():
 
     args.global_rank = torch.distributed.get_rank()
 
-    assert not args.offload, "zero-offload is not currently supported but coming soon!"
-
     unsupervised_training_enabled = args.unsupervised_dataset_name and args.unsupervised_dataset_config_name
     if unsupervised_training_enabled:
         #? if we enable unsupervised training, we need to double the batch size for actor model
@@ -463,7 +461,8 @@ def main():
     tokenizer = load_hf_tokenizer(args.actor_model_name_or_path,
                                   fast_tokenizer=True)
     tokenizer.pad_token = tokenizer.eos_token
-
+    # make sure tokenizer is right pad in our logic
+    tokenizer.padding_side = 'right'
     prompt_train_dataloader, unsupervised_train_dataloader, num_total_iters = create_datasets(
         args=args, tokenizer=tokenizer, train_phase=3)
 

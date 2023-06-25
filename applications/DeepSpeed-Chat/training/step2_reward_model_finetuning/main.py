@@ -208,8 +208,6 @@ def main():
 
     args.global_rank = torch.distributed.get_rank()
 
-    assert not args.offload, "zero-offload is not currently supported but coming soon!"
-
     ds_config = get_train_ds_config(offload=args.offload,
                                     stage=args.zero_stage)
     ds_config[
@@ -227,6 +225,8 @@ def main():
     #! 构造 rm模型
     # 其调用的是create_critic_model函数，该函数的主要类是RewardModel类
     # 
+    # make sure tokenizer is right pad in our logic
+    tokenizer.padding_side = 'right'
     rm_model = create_critic_model(args.model_name_or_path,
                                    tokenizer,
                                    ds_config,
