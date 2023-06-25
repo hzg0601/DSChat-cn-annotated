@@ -39,7 +39,7 @@ nnodes、node_rank与nproc_per_node： nnodes是指物理节点数量，node_ran
 world size ： 全局（一个分布式任务）中，rank的数量。
 
 单机多卡 python -m torch.distributed.run --nproc_per_node 2 --master_port 2393 ddp_train.py
-多级多卡
+多机多卡
 在机器0上运行python -m torch.distributed.launch --nproc_per_node=4 --nnodes=2 --node_rank=0 --master_addr="192.0.0.1" --master_port=1234 ddp.py
 在机器1上与运行python -m torch.distributed.launch --nproc_per_node=4 --nnodes=2 --node_rank=1 --master_addr="192.0.0.1" --master_port=1234 ddp.py
 不同机器上的node_rank不同，其余相同
