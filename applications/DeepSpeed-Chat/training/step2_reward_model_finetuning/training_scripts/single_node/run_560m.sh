@@ -12,7 +12,7 @@ if [[ $0 =~ ^\/.* ]]
 then
   script=$0
 else
-  script=$(pwd)/$0
+  script=$(pwd)
 fi
 path_dir=${script%%training_scripts*}
 echo $path_dir
