@@ -135,6 +135,12 @@ def parse_args():
         "Path to pretrained model or model identifier from huggingface.co/models.",
         required=True)
     parser.add_argument(
+        "--tokenizer_name_or_path",
+        type=str,
+        help=
+        "Path to pretrained tokenizer or tokenizer identifier from huggingface.co/models.",
+        default=None)
+    parser.add_argument(
         "--num_padding_at_beginning",
         type=int,
         default=1,
@@ -489,8 +495,15 @@ def main():
     torch.distributed.barrier()
 
     # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
-    tokenizer = load_hf_tokenizer(args.actor_model_name_or_path,
-                                  fast_tokenizer=True)
+    tokenizer_name_or_path = (args.tokenizer_name_or_path if args.tokenizer_name_or_path 
+                              else args.actor_model_name_or_path)
+    try:
+        tokenizer = load_hf_tokenizer(tokenizer_name_or_path,
+                                    fast_tokenizer=True)
+    except ValueError:
+        tokenizer = load_hf_tokenizer(tokenizer_name_or_path,
+                                    fast_tokenizer=False) 
+          
     prompt_train_dataloader, unsupervised_train_dataloader, num_total_iters = create_datasets(
         args=args, tokenizer=tokenizer, train_phase=3)
 

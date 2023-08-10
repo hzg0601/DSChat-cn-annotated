@@ -3,13 +3,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-ACTOR_MODEL_PATH=$1
-CRITIC_MODEL_PATH=$2
-ACTOR_ZERO_STAGE=$3
-CRITIC_ZERO_STAGE=$4
+ACTOR_MODEL_PATH=./output/output_step1/
+CRITIC_MODEL_PATH=./output/output_step2/
+ACTOR_ZERO_STAGE=2
+CRITIC_ZERO_STAGE=2
 OUTPUT=$5
+
+echo $1,$2,$3,$4,$5
 if [ "$OUTPUT" == "" ]; then
-    OUTPUT=./output
+    OUTPUT=./output/output_step3
 fi
 if [ "$ACTOR_ZERO_STAGE" == "" ]; then
     ACTOR_ZERO_STAGE=2
@@ -24,11 +26,21 @@ Num_Padding_at_Beginning=1 # this is model related
 Actor_Lr=9.65e-6
 Critic_Lr=5e-6
 
-ds --master_port 12346 main.py \
-   --data_path Dahoas/rm-static \
+if [[ $0 =~ ^\/.* ]]; then
+    script=$0
+    echo '0:'$script
+else
+    script=$(pwd)/$0
+    echo 'pwd:'$script
+fi
+path_dir=${script%%training_scripts*}
+
+ds --master_port 12346 $path_dir'main.py' \
+   --data_path $HOME/.cache/huggingface/hub/datasets--Dahoas--full-hh-rlhf \
    --data_split 2,4,4 \
    --actor_model_name_or_path $ACTOR_MODEL_PATH \
    --critic_model_name_or_path $CRITIC_MODEL_PATH \
+   --tokenizer_name_or_path bigscience/tokenizer \
    --num_padding_at_beginning 1 \
    --per_device_train_batch_size 4 \
    --per_device_mini_train_batch_size 4 \
@@ -52,4 +64,4 @@ ds --master_port 12346 main.py \
    --print_answers \
    --enable_tensorboard \
    --tensorboard_path $OUTPUT \
-    &> $OUTPUT/training.log
+    > $OUTPUT/step3_training_bloom_560m_full_hh_rlhf.log 2>&1 &

@@ -1,18 +1,18 @@
 OUTPUT=$1
 ZERO_STAGE=$2
 if [ "$OUTPUT" == "" ]; then
-    OUTPUT=./output
+    OUTPUT=./output/output_step2
 fi
 if [ "$ZERO_STAGE" == "" ]; then
     ZERO_STAGE=2
 fi
 mkdir -p $OUTPUT
-
+# =~以正则表达式匹配，如果$0以/开头则
 if [[ $0 =~ ^\/.* ]]   
 then
   script=$0
 else
-  script=$(pwd)
+  script=$(pwd)/$0
 fi
 path_dir=${script%%training_scripts*}
 echo $path_dir
