@@ -51,6 +51,8 @@ import torch
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.data.distributed import DistributedSampler
 
+from torch.utils.tensorboard import SummaryWriter
+
 from transformers import (
     SchedulerType,
     default_data_collator,
@@ -69,8 +71,11 @@ from utils.data.data_utils import create_prompt_dataset, MiniDataset, DataCollat
 from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed, get_all_reduce_mean, moving_average, save_zero_three_model, load_hf_tokenizer
 from utils.module.lora import convert_lora_to_linear_layer
 
+writer = None
+
 
 def parse_args():
+    global writer
     parser = argparse.ArgumentParser(
         description="(Step 3) RLHF training arguments")
 
@@ -87,7 +92,7 @@ def parse_args():
         default='2,4,4',
         help=
         'Comma-separated list of proportions for training phase 1, 2, and 3 data. For example the split `2,4,4` '
-        'will use 60% of data for phase 1, 20% for phase 2 and 20% for phase 3.'
+        'will use 60%% of data for phase 1, 20%% for phase 2 and 20%% for phase 3.'
     )
     parser.add_argument(
         '--data_output_path',
@@ -345,22 +350,48 @@ def parse_args():
     parser.add_argument('--enable_ema',
                         action='store_true',
                         help='Enable EMA checkpoint for the model.')
+    ## Tensorboard logging
+    parser.add_argument('--enable_tensorboard',
+                        action='store_true',
+                        help='Enable tensorboard logging')
+    parser.add_argument('--tensorboard_path',
+                        type=str,
+                        default="step3_tensorboard")
+    ## Actor/critic model overflow alignment
+    parser.add_argument(
+        '--align_overflow',
+        action='store_true',
+        help='Align loss scale overflow between actor and critic')
+    ## Print actor model answers during training
+    parser.add_argument('--print_answers',
+                        action='store_true',
+                        help='Print prompt and answers during training')
 
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
 
-    # Validate settings
-    if (args.actor_gradient_checkpointing
-            and args.actor_lora_dim > 0) or (args.critic_gradient_checkpointing
-                                             and args.critic_lora_dim > 0):
-        assert (
-            not args.only_optimize_lora
-        ), "--{actor,critic}_gradient_checkpointing and --only_optimize_lora cannot be enabled at the same time."
+    if args.enable_tensorboard:
+        print(
+            f"Tensorboard logs going to: {args.tensorboard_path}/step3_tensorboard_logs"
+        )
+        writer = SummaryWriter(
+            f"{args.tensorboard_path}/step3_tensorboard_logs")
 
+    # Validate settings
     if args.inference_tp_size > 1:
         assert (
             args.actor_zero_stage == 3
         ), "Zero stage 3 must be used to do Tensor sharding in the hybrid engine"
+
+    if args.actor_zero_stage == 2 and args.critic_zero_stage == 2 and args.enable_hybrid_engine and args.offload and args.actor_lora_dim == 0:
+        raise ValueError(
+            "The combination of [actor_zero_stage==2, critic_zero_stage==2, enable_hybrid_engine=True, offload=True, lora=False] is currently unsupported due to training instability!"
+        )
+
+    if args.actor_zero_stage == 3 and args.critic_zero_stage == 3 and args.enable_hybrid_engine and args.offload and args.actor_lora_dim > 0:
+        raise ValueError(
+            "The combination of [actor_zero_stage==3, critic_zero_stage==3, enable_hybrid_engine=True, offload=True, lora=True] is currently unsupported due to training instability!"
+        )
 
     return args
 
@@ -456,13 +487,10 @@ def main():
     set_random_seed(args.seed)
     # 同步各节点的通信
     torch.distributed.barrier()
-    #* 2. 基于actor模型加载tokenizer，构造训练数据
-    # create common tokenizer based on actor model
+
+    # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
     tokenizer = load_hf_tokenizer(args.actor_model_name_or_path,
                                   fast_tokenizer=True)
-    tokenizer.pad_token = tokenizer.eos_token
-    # make sure tokenizer is right pad in our logic
-    tokenizer.padding_side = 'right'
     prompt_train_dataloader, unsupervised_train_dataloader, num_total_iters = create_datasets(
         args=args, tokenizer=tokenizer, train_phase=3)
 
@@ -586,6 +614,30 @@ def main():
                 # 假设每个worker的数据是一个长度为S的向量，那么个Ring AllReduce里，每个worker发送的数据量是O(S)，和worker的数量N无关。
                 #* 14. ppo_epochs训练完毕后，调用all_reduce方法计算全局平均奖励
                 average_reward = get_all_reduce_mean(average_reward).item()
+                print_rank_0(
+                    f"average reward score: {average_reward/inner_iter}",
+                    args.global_rank)
+                print_rank_0(
+                    "-------------------------------------------------------------------------------------",
+                    args.global_rank)
+                if args.enable_tensorboard and torch.distributed.get_rank(
+                ) == 0:
+                    writer.add_scalar('reward',
+                                      average_reward / inner_iter,
+                                      global_step=step)
+                    writer.add_scalar('actor_loss',
+                                      actor_loss,
+                                      global_step=step)
+                    writer.add_scalar('actor_loss_sum',
+                                      actor_loss_sum,
+                                      global_step=step)
+                    writer.add_scalar('critic_loss',
+                                      critic_loss,
+                                      global_step=step)
+                    writer.add_scalar('critic_loss_sum',
+                                      critic_loss_sum,
+                                      global_step=step)
+                    writer.flush()
 
                 print_rank_0(f"average reward score: {average_reward/inner_iter}",args.global_rank)
                 print_rank_0("-----------------------------------------------------",args.global_rank)

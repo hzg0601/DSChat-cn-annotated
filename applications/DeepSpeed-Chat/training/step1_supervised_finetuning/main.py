@@ -92,7 +92,7 @@ sys.path.append(
 from utils.data.data_utils import create_prompt_dataset
 from utils.utils import print_rank_0, to_device, save_hf_format, set_random_seed, get_all_reduce_mean, get_optimizer_grouped_parameters, save_zero_three_model, load_hf_tokenizer
 from utils.ds_utils import get_train_ds_config
-from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_linear_layer, only_optimize_lora_parameters
+from utils.module.lora import convert_linear_layer_to_lora, convert_lora_to_linear_layer, only_optimize_lora_parameters, make_model_gradient_checkpointing_compatible
 from utils.model.model_utils import create_hf_model
 
 
@@ -111,8 +111,8 @@ def parse_args():
                         default='2,4,4',
                         help='Comma-separated list of proportions for training'
                         'phase 1, 2, and 3 data. For example the split `6,2,2`'
-                        'will use 60% of data for phase 1, 20% for phase 2'
-                        'and 20% for phase 3.')
+                        'will use 60%% of data for phase 1, 20%% for phase 2'
+                        'and 20%% for phase 3.')
     parser.add_argument(
         '--sft_only_data_path',
         nargs='*',
@@ -128,9 +128,17 @@ def parse_args():
     parser.add_argument(
         "--model_name_or_path",
         type=str,
+        default="facebook/opt-1.3b",
         help=
         "Path to pretrained model or model identifier from huggingface.co/models.",
-        required=True,
+        # required=True,
+    )
+    parser.add_argument(
+        "--tokenizer_name_or_path",
+        type=str,
+        default=None,
+        help=
+        "Path to pretrained tokenizer or tokenizer identifier from huggingface.co/models, if None, use `model_name_or_path`"
     )
     parser.add_argument(
         "--per_device_train_batch_size",
@@ -240,14 +248,19 @@ def parse_args():
     parser.add_argument('--only_optimize_lora',
                         action='store_true',
                         help='Only optimize the LoRA parameters.')
+    ## Tensorboard logging
+    parser.add_argument('--enable_tensorboard',
+                        action='store_true',
+                        help='Enable tensorboard logging')
+    parser.add_argument('--tensorboard_path',
+                        type=str,
+                        default="step1_tensorboard")
+    ## Print loss
+    parser.add_argument('--print_loss',
+                        action='store_true',
+                        help='Prints loss at each step.')
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
-
-    # Validate settings
-    if args.gradient_checkpointing and args.lora_dim > 0:
-        assert (
-            not args.only_optimize_lora
-        ), "--gradient_checkpointing and --only_optimize_lora cannot be enabled at the same time."
 
     return args
 
@@ -274,7 +287,10 @@ def main():
     # train_batch_size根据args.per_device_train_batch_size，总进程数world_size、梯度更新步的乘积重设
     # 故ds_config的train_batch_size是每次模型全局更新梯度的batch_size
     ds_config = get_train_ds_config(offload=args.offload,
-                                    stage=args.zero_stage)
+                                    stage=args.zero_stage,
+                                    enable_tensorboard=args.enable_tensorboard,
+                                    tb_path=args.tensorboard_path,
+                                    tb_name="step1_model")
     ds_config[
         'train_micro_batch_size_per_gpu'] = args.per_device_train_batch_size
     ds_config[
@@ -290,13 +306,18 @@ def main():
     #* 3. 调用torch.distributed.barrier进行同步通信
     torch.distributed.barrier()
     #* 4. 加载hf的tokenizer和model
-    tokenizer = load_hf_tokenizer(args.model_name_or_path, fast_tokenizer=True)
     # 指定填充标记(pad_token)使用结束标记(eos_token)。pad_token 是 tokenizer 中用于补足输入序列长度的填充标记,默认是 [PAD]。
     # eos_token 是 tokenizer 中用于表示序列结束的标记,默认是 [SEP]。
     # 所以,这个设置就是指定我们使用 [SEP] 标记来进行补充填充,而不是默认的 [PAD] 标记。
     tokenizer.pad_token = tokenizer.eos_token
     # make sure tokenizer is right pad in our logic
     tokenizer.padding_side = 'right'
+
+    # load_hf_tokenizer will get the correct tokenizer and set padding tokens based on the model family
+    # Occasionally , some repo owners of huggingface hub, such as bigscience, would like to separate model and tokenizer
+    tokenizer_name_or_path = args.model_name_or_path if not args.tokenizer_name_or_path else args.tokenizer_name_or_path
+
+    tokenizer = load_hf_tokenizer(tokenizer_name_or_path, fast_tokenizer=True)
     model = create_hf_model(AutoModelForCausalLM,
                             args.model_name_or_path,
                             tokenizer,
@@ -308,6 +329,7 @@ def main():
                                              args.lora_dim)
         if args.only_optimize_lora:
             model = only_optimize_lora_parameters(model)
+            model = make_model_gradient_checkpointing_compatible(model)
 
     # Prepare the data
     #* 6. 分割prompt数据
@@ -418,6 +440,10 @@ def main():
             batch = to_device(batch, device)
             outputs = model(**batch, use_cache=False)
             loss = outputs.loss
+            if args.print_loss:
+                print(
+                    f"Epoch: {epoch}, Step: {step}, Rank: {torch.distributed.get_rank()}, loss = {loss}"
+                )
             model.backward(loss)
             model.step()
 

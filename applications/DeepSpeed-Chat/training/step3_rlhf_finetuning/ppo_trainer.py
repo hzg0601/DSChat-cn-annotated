@@ -89,9 +89,10 @@ class DeepSpeedPPOTrainer():
         self.max_answer_seq_len = args.max_answer_seq_len
         self.end_of_conversation_token_id = self.tokenizer(
             args.end_of_conversation_token)['input_ids'][-1]
+        self.z3_enabled = args.actor_zero_stage == 3
 
         # Those value can be changed
-        self.kl_ctl = 0.02
+        self.kl_ctl = 0.1
         self.clip_reward_value = 5
         self.cliprange = 0.2
         self.cliprange_value = 0.2
@@ -106,10 +107,12 @@ class DeepSpeedPPOTrainer():
         max_min_length = self.max_answer_seq_len + prompts.shape[1]
 
         with torch.no_grad():
-            seq = self.actor_model.module.generate(prompts,
-                                                   attention_mask=mask,
-                                                   max_length=max_min_length,
-                                                   min_length=max_min_length)
+            seq = self.actor_model.module.generate(
+                prompts,
+                attention_mask=mask,
+                max_length=max_min_length,
+                pad_token_id=self.tokenizer.pad_token_id,
+                synced_gpus=self.z3_enabled)
 
         # Filter out seq with no answers (or very short). 
         # This happens when users directly use the pre-training ckpt without supervised finetuning
@@ -118,7 +121,17 @@ class DeepSpeedPPOTrainer():
         prompt_length = prompts.shape[1]
         ans = seq[:, prompt_length:] #* 由此可以看出transformers的generate方法返回的前一部分是seq
         self.prompt_length = prompt_length
+        ans = seq[:, prompt_length:]
         valid_ans_len = (ans != self.tokenizer.pad_token_id).sum(dim=-1)
+
+        if self.args.print_answers:
+            print(
+                f"--- prompt --> step={step}, rank={torch.distributed.get_rank()}, {self.tokenizer.batch_decode(prompts, skip_special_tokens=True)}"
+            )
+            print(
+                f"--- ans    --> step={step}, rank={torch.distributed.get_rank()}, {self.tokenizer.batch_decode(ans, skip_special_tokens=True)}"
+            )
+
         out_seq = []
         #* 生成以后的计算以seq为基准，与prompts无关
         for i in range(batch_size):
@@ -150,7 +163,6 @@ class DeepSpeedPPOTrainer():
         # 与给定的对象比较，返回一个与seq形状一致的bool类型，即确定attention的字符
         # 非padding字符为True, padding字符为False
         attention_mask = seq.not_equal(pad_token_id).long()
-
         with torch.no_grad():
             #* 3. 根据生成的answer和掩码，调用actor和reference模型生成answer的嵌入矩阵
             output = self.actor_model(seq, attention_mask=attention_mask)
@@ -249,9 +261,13 @@ class DeepSpeedPPOTrainer():
         with torch.no_grad():
             old_rewards = self.compute_rewards(prompts, log_probs,
                                                ref_log_probs, reward_score,
-                                               action_mask) # batch_size * (answer_len -1)
-            # # old_values answer最后一个token的得分,old_reward公式2计算的以
-            # 最后一个非padding token为基准的得分，start: prompts_seq_len - 1
+                                               action_mask)
+            ends = start + action_mask[:, start:].sum(1) + 1
+            # we need to zero out the reward and value after the end of the conversation
+            # otherwise the advantage/return will be wrong
+            for i in range(old_rewards.shape[0]):
+                old_rewards[i, ends[i]:] = 0
+                old_values[i, ends[i]:] = 0
             advantages, returns = self.get_advantages_and_returns(
                 old_values, old_rewards, start)
 
@@ -270,8 +286,10 @@ class DeepSpeedPPOTrainer():
                                         action_mask[:, start:])
         # 更新actor模型
         self.actor_model.backward(actor_loss)
-        self.actor_model.step()
-        #* 再计算一次critic模型针对answer_seq的得分
+
+        if not self.args.align_overflow:
+            self.actor_model.step()
+
         value = self.critic_model.forward_value(**batch,
                                                 return_value_only=True,
                                                 use_cache=False)[:, :-1]
@@ -280,6 +298,30 @@ class DeepSpeedPPOTrainer():
                                           returns, action_mask[:, start:])
         # 更新critic模型
         self.critic_model.backward(critic_loss)
+
+        if self.args.align_overflow:
+            actor_overflow = self.actor_model.optimizer.check_overflow(
+                external=True)
+            critic_overflow = self.critic_model.optimizer.check_overflow(
+                external=True)
+
+            rank = torch.distributed.get_rank()
+            if actor_overflow and not critic_overflow:
+                self.critic_model.optimizer.skip_step = True
+                print_rank_0(
+                    "OVERFLOW: actor overflow, skipping both actor and critic steps",
+                    rank)
+            elif not actor_overflow and critic_overflow:
+                self.actor_model.optimizer.skip_step = True
+                print_rank_0(
+                    "OVERFLOW: critic overflow, skipping both actor and critic steps",
+                    rank)
+            elif actor_overflow and critic_overflow:
+                print_rank_0(
+                    "OVERFLOW: actor and critic overflow, skipping both actor and critic steps",
+                    rank)
+            self.actor_model.step()
+
         self.critic_model.step()
 
         return actor_loss, critic_loss

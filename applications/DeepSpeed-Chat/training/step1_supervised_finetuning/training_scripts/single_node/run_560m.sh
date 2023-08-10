@@ -25,9 +25,10 @@ echo $path_dir
 nohup ds --num_gpus 2 $path_dir'main.py' \
    --data_path $HOME/.cache/huggingface/hub/datasets--Dahoas--full-hh-rlhf   \
    --data_split 2,4,4 \
-   --model_name_or_path facebook/opt-1.3b \
-   --per_device_train_batch_size 8 \
-   --per_device_eval_batch_size 8 \
+   --model_name_or_path bigscience/bloom-560m \
+   --tokenizer_name_or_path bigscience/tokenizer \
+   --per_device_train_batch_size 4 \
+   --per_device_eval_batch_size 4 \
    --max_seq_len 512 \
    --learning_rate 9.65e-6 \
    --weight_decay 0. \
@@ -41,6 +42,6 @@ nohup ds --num_gpus 2 $path_dir'main.py' \
    --enable_tensorboard \
    --tensorboard_path $OUTPUT \
    --output_dir $OUTPUT \
-   > $OUTPUT/training.log 2>&1 &
+   > $OUTPUT/training_step1_bloom_560m_dahoas_full_hh_rlhf.log 2>&1 &
 
 # Dahoas/full-hh-rlhf Dahoas/synthetic-instruct-gptj-pairwise yitingxie/rlhf-reward-datasets
