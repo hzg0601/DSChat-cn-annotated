@@ -1,6 +1,8 @@
 #!/bin/bash
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
+scl enable devtoolset-9 bash
+export LD_LIBRARY_PATH=/home/huangzhiguo/anaconda3/envs/deepspeed/lib:$LD_LIBRARY_PATH
 
 # DeepSpeed Team
 ACTOR_MODEL_PATH=./output/output_step1/
@@ -34,16 +36,16 @@ else
     echo 'pwd:'$script
 fi
 path_dir=${script%%training_scripts*}
-
-ds --master_port 12346 $path_dir'main.py' \
+#!bug1 RuntimeError: Subtraction, the `-` operator -> ds_attention.py,1-input_mask修改为~input_mask
+ds --master_port 12346 --num_gpu 2 $path_dir'main.py' \
    --data_path $HOME/.cache/huggingface/hub/datasets--Dahoas--full-hh-rlhf \
    --data_split 2,4,4 \
    --actor_model_name_or_path $ACTOR_MODEL_PATH \
    --critic_model_name_or_path $CRITIC_MODEL_PATH \
    --tokenizer_name_or_path bigscience/tokenizer \
    --num_padding_at_beginning 1 \
-   --per_device_train_batch_size 4 \
-   --per_device_mini_train_batch_size 4 \
+   --per_device_train_batch_size 2 \
+   --per_device_mini_train_batch_size 2 \
    --generation_batch_numbers 1 \
    --ppo_epochs 1 \
    --max_answer_seq_len 256 \

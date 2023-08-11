@@ -566,7 +566,8 @@ def main():
             #* 计算answer在critic_model下的最后一个字符全部序列的得分，在reward_model模型下chosen序列最后一个实际字符的得分，
             #* 返回全部中间及最终结果
             out = trainer.generate_experience(batch_prompt['prompt'],
-                                              batch_prompt['prompt_att_mask'])
+                                              batch_prompt['prompt_att_mask'],
+                                              step)
             #* 8. 调用MiniDataset类，将generate_experience返回的mini-batch继续分割为micro-batch
             #* 在将mini-batch的个数搜集到max_size个时才开始ppo训练
             exp_dataset = exp_mini_dataset.add(out)

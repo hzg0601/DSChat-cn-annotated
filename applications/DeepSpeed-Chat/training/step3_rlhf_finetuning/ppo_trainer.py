@@ -99,7 +99,7 @@ class DeepSpeedPPOTrainer():
         self.gamma = 1.0
         self.lam = 0.95
 
-    def _generate_sequence(self, prompts, mask):
+    def _generate_sequence(self, prompts, mask,step):
         """
         以无梯度的方式生成给定prompts的answer,
         然后删除回复长度小于1的条目
@@ -119,7 +119,7 @@ class DeepSpeedPPOTrainer():
         # NOTE: this will causes each GPU has different number of examples
         batch_size = seq.shape[0]
         prompt_length = prompts.shape[1]
-        ans = seq[:, prompt_length:] #* 由此可以看出transformers的generate方法返回的前一部分是seq
+        #* 由此可以看出transformers的generate方法返回的前一部分是seq
         self.prompt_length = prompt_length
         ans = seq[:, prompt_length:]
         valid_ans_len = (ans != self.tokenizer.pad_token_id).sum(dim=-1)
@@ -144,7 +144,7 @@ class DeepSpeedPPOTrainer():
 
         return out_seq
 
-    def generate_experience(self, prompts, mask):
+    def generate_experience(self, prompts, mask,step):
         """
         根据给定的prompts和mask，先调用actor模型生成answer和mask
         然后以非追踪梯度的方式计算answer在actor_model、refernece_model下的logit;
@@ -155,7 +155,7 @@ class DeepSpeedPPOTrainer():
         """
         #* 1.首先令actor模型针对给定的prompts,生成answer，无需梯度追踪
         self.eval()
-        seq = self._generate_sequence(prompts, mask)
+        seq = self._generate_sequence(prompts, mask,step)
         #* 2. 生成answer的掩码
         self.train()
 
