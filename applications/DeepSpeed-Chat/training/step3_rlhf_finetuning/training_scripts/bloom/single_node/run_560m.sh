@@ -1,9 +1,9 @@
 #!/bin/bash
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
-scl enable devtoolset-9 bash
-export LD_LIBRARY_PATH=/home/huangzhiguo/anaconda3/envs/deepspeed/lib:$LD_LIBRARY_PATH
-
+# scl enable devtoolset-9 bash
+export LD_LIBRARY_PATH=/home/data/miniconda3.9/envs/ds/lib/:$LD_LIBRARY_PATH
+#! AttributeError: module 'triton.language' has no attribute 'constexpr' -> trition must be 2.0.0 after install deepspeed
 # DeepSpeed Team
 ACTOR_MODEL_PATH=./output/output_step1/
 CRITIC_MODEL_PATH=./output/output_step2/
