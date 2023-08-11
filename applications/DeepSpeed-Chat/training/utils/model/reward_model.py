@@ -54,8 +54,7 @@ class RewardModel(nn.Module):
                 head_mask=None,
                 inputs_embeds=None,
                 use_cache=False):
-        loss = None
-        # BaseModelOutput的输出：
+                # BaseModelOutput的输出：
         # last_hidden_state: Sequence of hidden-states at the output of the last layer of the model.
         # hidden_sates: optional, output of each layer  shape (batch_size, sequence_length, hidden_size)
         # attention: optional shape (batch_size, num_heads, sequence_length, sequence_length)
@@ -78,15 +77,24 @@ class RewardModel(nn.Module):
         #? 由于没有传入label,因此其第一个返回值是logits(batch_size, sequence_length, config.vocab_size)
         #? 此处的写法意思应是BaseModelOutput，第一个返回值为hidden_states->RewardModel调用的是AutoModel
         #? 因此是预训练（而监督微调的）基础模型，故返回为BaseMdoelOutput, 
+
+        loss = None
+
+        if self.config.model_type == "llama":
+            kwargs = dict()
+        else:
+            kwargs = dict(head_mask=head_mask)
+
         transformer_outputs = self.rwtranrsformer(
             input_ids, # 就是输入的序列batch_size*seq_len
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            head_mask=head_mask,
             inputs_embeds=inputs_embeds,
-            use_cache=use_cache)
-        #? 基础模型的返回的logits,按论文应该是最后一个embedding吧?
+            use_cache=use_cache,
+            **kwargs)
+
         hidden_states = transformer_outputs[0]
+        #? 基础模型的返回的logits,按论文应该是最后一个embedding吧?
         # 然后输出一个标量
         rewards = self.v_head(hidden_states).squeeze(-1) # 原始返回为3维，加squeeze为 batch_size * seq 
         chosen_mean_scores = []
@@ -185,13 +193,18 @@ class RewardModel(nn.Module):
         若return_value_only=True,则返回所有token的得分,shape: batch_size * input_len;
         若return_value_only=False，则返回最后一个非padding token的得分，shape：batch_size * 1;
         """
+        if self.config.model_type == "llama":
+            kwargs = dict()
+        else:
+            kwargs = dict(head_mask=head_mask)
+
         transformer_outputs = self.rwtranrsformer(
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            head_mask=head_mask,
             inputs_embeds=inputs_embeds,
-            use_cache=use_cache)
+            use_cache=use_cache,
+            **kwargs)
         hidden_states = transformer_outputs[0]
         values = self.v_head(hidden_states).squeeze(-1)
         if return_value_only:

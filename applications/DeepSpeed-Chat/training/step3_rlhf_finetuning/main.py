@@ -372,6 +372,18 @@ def parse_args():
     parser.add_argument('--print_answers',
                         action='store_true',
                         help='Print prompt and answers during training')
+    ## Testing
+    parser.add_argument(
+        '--enable_test_mode',
+        action='store_true',
+        help=
+        'Enable a testing mode that terminates training based on args.test_stop_step'
+    )
+    parser.add_argument(
+        "--test_stop_step",
+        type=int,
+        default=0,
+        help="Training step at which to terminate training during testing.")
 
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
@@ -656,8 +668,15 @@ def main():
                 print_rank_0(f"average reward score: {average_reward/inner_iter}",args.global_rank)
                 print_rank_0("-----------------------------------------------------",args.global_rank)
             #* 15. 在ppo_epochs训练完毕，根据args.actor_gradient_checkpointing参数在训练完毕后关闭actor的梯度检查点功能。
+            
             if args.actor_gradient_checkpointing:
                 rlhf_engine.actor.gradient_checkpointing_disable()
+
+            if args.enable_test_mode and step == args.test_stop_step:
+                break
+
+        if args.enable_test_mode:
+            break
     #* 16. 根据lora、ema、actor_zero_stage等参数保存actor,critic,actor_ema模型
     if args.output_dir is not None:
         print_rank_0('saving model ...')
