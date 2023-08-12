@@ -3,7 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # scl enable devtoolset-9 bash
 export LD_LIBRARY_PATH=/home/data/miniconda3.9/envs/ds/lib/:$LD_LIBRARY_PATH
-#! AttributeError: module 'triton.language' has no attribute 'constexpr' -> trition must be 2.0.0 after install deepspeed
+#! AttributeError: module 'triton.language' has no attribute 'constexpr' --> trition must be 2.0.0 after install deepspeed
+#! out of range integral type conversion attempted --> 
+# prompts = torch.where((prompts < self.tokenizer.vocab_size)&(prompts >= 0), prompts, self.tokenizer.unk_token_id)
+# seq = torch.where((seq < self.tokenizer.vocab_size)&(seq >= 0), seq, self.tokenizer.unk_token_id)
+#! Exception: Current loss scale already at minimum - cannot decrease scale anymore. Exiting run. --> https://blog.csdn.net/qq_42327424/article/details/129816423
+#! UnboundLocalError: local variable 'matmul_result' referenced before assignment-->
 # DeepSpeed Team
 ACTOR_MODEL_PATH=./output/output_step1/
 CRITIC_MODEL_PATH=./output/output_step2/
@@ -44,8 +49,8 @@ ds --master_port 12346 --num_gpu 2 $path_dir'main.py' \
    --critic_model_name_or_path $CRITIC_MODEL_PATH \
    --tokenizer_name_or_path bigscience/tokenizer \
    --num_padding_at_beginning 1 \
-   --per_device_train_batch_size 2 \
-   --per_device_mini_train_batch_size 2 \
+   --per_device_train_batch_size 8 \
+   --per_device_mini_train_batch_size 4 \
    --generation_batch_numbers 1 \
    --ppo_epochs 1 \
    --max_answer_seq_len 256 \

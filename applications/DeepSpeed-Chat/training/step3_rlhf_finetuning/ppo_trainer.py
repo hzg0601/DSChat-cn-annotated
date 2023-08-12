@@ -114,7 +114,7 @@ class DeepSpeedPPOTrainer():
             kwargs = dict(do_sample=False)
         else:
             kwargs = dict()
-
+        prompts = torch.where((prompts < self.tokenizer.vocab_size)&(prompts >= 0), prompts, self.tokenizer.unk_token_id)
         with torch.no_grad():
             seq = self.actor_model.module.generate(
                 prompts,
@@ -131,16 +131,27 @@ class DeepSpeedPPOTrainer():
         prompt_length = prompts.shape[1]
         #* 由此可以看出transformers的generate方法返回的前一部分是seq
         self.prompt_length = prompt_length
+        seq = torch.where((seq < self.tokenizer.vocab_size)&(seq >= 0), seq, self.tokenizer.unk_token_id)
         ans = seq[:, prompt_length:]
         valid_ans_len = (ans != self.tokenizer.pad_token_id).sum(dim=-1)
-
+        #! out of range integral type conversion attempted -> 
+        # prompts = torch.clamp(prompts, min=0, max=self.tokenizer.vocab_size)
+        # ans = torch.clamp(ans,min=0,max=self.tokenizer.vocab_size)
         if self.args.print_answers:
-            print(
-                f"--- prompt --> step={step}, rank={torch.distributed.get_rank()}, {self.tokenizer.batch_decode(prompts, skip_special_tokens=True)}"
-            )
-            print(
-                f"--- ans    --> step={step}, rank={torch.distributed.get_rank()}, {self.tokenizer.batch_decode(ans, skip_special_tokens=True)}"
-            )
+
+            try:
+                print(
+                    f"--- prompt --> step={step}, rank={torch.distributed.get_rank()}, {self.tokenizer.batch_decode(prompts, skip_special_tokens=True)}"
+                )
+                print(
+                    f"--- ans    --> step={step}, rank={torch.distributed.get_rank()}, {self.tokenizer.batch_decode(ans, skip_special_tokens=True)}"
+                )
+            except Exception as e:
+                print(e)
+                print("*"*100)
+                print(f"the prompts is :{prompts}")
+                print(f"the ans is: {ans}")
+
 
         out_seq = []
         #* 生成以后的计算以seq为基准，与prompts无关
@@ -150,7 +161,12 @@ class DeepSpeedPPOTrainer():
                 continue
             else:
                 out_seq.append(seq[i:i + 1])
-        out_seq = torch.cat(out_seq, dim=0)  # concate output in the batch dim
+        if out_seq:
+            out_seq = torch.cat(out_seq, dim=0)  # concate output in the batch dim
+        else:
+            print("WARNING: the out_seq is empty!")
+            print(f"the batch_size is:{batch_size}, the shape of seq is: {seq.shape},the prompt length is:{prompt_length}")
+            out_seq
 
         return out_seq
 
