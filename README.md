@@ -98,12 +98,12 @@ chosen和reject得分，以二者的差的sigmoid.mean()为损失。
 该脚本的核心是PPO训练类，该类的主方法为train_rlhf,主要流程如下：
 
     0. 前置调用generate_experience方法，令actor,ref,reward,critic模型生成:
-    answer_seq, 
+    answer_seq,
     actor针对answer_seq除第一个外所有token的logit:log_probs,
     ref针对answer_seq除第一个外所有token的logit:ref_log_probs,
     reward针对answer_seq最后一个非padding token的得分:rewards，
     critic针对answer_seq去除最后一个token（bos_token）的原始得分:values, 重命名为old_values
-    
+
     1. 首先根据log_probs和ref_log_probs, reward调用compute_reward计算公式2的PPO目标损失
         首先计算actor_model和reference_model针对answer的嵌入的logits的差，乘以-\beta 即KL奖励系数
         然后加上每个answer最后一个非padding token的得分，即文中的公式2,作为actor模型的奖励
@@ -119,30 +119,26 @@ chosen和reject得分，以二者的差的sigmoid.mean()为损失。
 
 ## 2. Training
 
-There are several training and finetuning examples so please see the individual folders for specific instructions.
 
-## 3. Inference
+## QA
 
-The DeepSpeed Huggingface inference [README](./inference/huggingface/README.md) explains how to get started with running DeepSpeed Huggingface inference examples.
+执行步骤：
+1. 创建基于gcc-9.5.0的环境，推荐基于conda安装
+2. 将虚拟环境的lib加到动态库路径环境变量中；
+```shell
+export LD_LIBRARY_PATH=/home/data/miniconda3.9/envs/ds/lib/:$LD_LIBRARY_PATH
+```
+可能的问题：
+1. ! AttributeError: module 'triton.language' has no attribute 'constexpr'--> trition must be 2.0.0 after install deepspeed
 
-## 4. Compression
+2. ! out of range integral type conversion attempted -->
 
-Model compression examples.
+ prompts = torch.where((prompts < self.tokenizer.vocab_size)&(prompts >= 0), prompts, self.tokenizer.unk_token_id)
 
-## 5. Benchmarks
+ seq = torch.where((seq < self.tokenizer.vocab_size)&(seq >= 0), seq, self.tokenizer.unk_token_id)
 
-All benchmarks that use the DeepSpeed library are maintained in this folder.
+3. ! Exception: Current loss scale already at minimum - cannot decrease scale anymore. Exiting run. --> 
+https://blog.csdn.net/qq_42327424/article/details/129816423
 
-# Contributing
-
-This project welcomes contributions and suggestions.  Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit [https://cla.opensource.microsoft.com](https://cla.opensource.microsoft.com).
-
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
-provided by the bot. You will only need to do this once across all repos using our CLA.
-
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact <opencode@microsoft.com> with any additional questions or comments.
+4. ! UnboundLocalError: local variable 'matmul_result' referenced before assignment-->
+修改对应的ds代码
